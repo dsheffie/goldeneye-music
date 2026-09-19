@@ -9,10 +9,13 @@ this repository** - you supply your own big-endian `.z64` image.
   the ROM's real audio microcode runs on the RSP model from
   [rsp-bt](https://github.com/dsheffie/rsp-bt): an interpreter, an LLVM binary
   translator, or a build-time AVX-512 recompilation, all byte-identical.  See
-  `gemusic/README.md`.
+  `gemusic/README.md`.  The same directory builds `gemms`, an XMMS-style player that
+  runs the engine live.
 - `tools/` - Python: `extract_music.py` (sequences to standard MIDI, instrument samples
   to WAV with loop points, bank to JSON), `ctl.py` (libultra bank parser),
   `render_all.py` (batch render through gemusic).
+
+See [THEORY_OF_OPERATION.md](THEORY_OF_OPERATION.md) for how it works.
 
 ## Building
 
