@@ -4,7 +4,7 @@
 # when missing.  The only hard requirements are a C++17 compiler, zlib, Boost and
 # the two sibling checkouts (interp_mips for the R4300 core, rsp-bt for the RSP).
 cmake_minimum_required(VERSION 3.20)
-project(goldeneye_music CXX)
+project(goldeneye_music C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -44,16 +44,45 @@ if(NOT SDL2_FOUND)
   find_package(SDL2 QUIET)
 endif()
 
-# The translator uses llvm::CodeGenOptLevel and the LLJIT/PassBuilder shape, which
-# is LLVM 18 and later.  Older LLVMs are ignored rather than failing the build.
+# The translator uses llvm::CodeGenOptLevel and the LLJIT/PassBuilder shape, which is
+# LLVM 18 and later.  Older LLVMs are ignored rather than failing the build.
+#
+# LLVM's config package declares itself compatible only with an exact version, so
+# find_package(LLVM 18) never matches LLVM 19 or 20 -- the version has to be checked
+# afterwards.  Debian and Homebrew also install versions side by side without always
+# leaving one in cmake's search path, so walk the candidates newest-first.
 set(LLVM_MIN 18)
-find_package(LLVM ${LLVM_MIN} CONFIG QUIET)
-if(NOT LLVM_FOUND)
-  find_package(LLVM CONFIG QUIET)
-  if(LLVM_FOUND AND LLVM_PACKAGE_VERSION VERSION_LESS ${LLVM_MIN})
-    message(STATUS "LLVM ${LLVM_PACKAGE_VERSION} is too old (need ${LLVM_MIN}+); JIT disabled")
-    set(LLVM_FOUND FALSE)
+
+# a macro, not a function: find_package sets a pile of LLVM_* variables and a function
+# would keep every one of them except what we forward in its own scope
+macro(try_llvm dir)
+  if(NOT LLVM_FOUND)
+    if(NOT "${dir}" STREQUAL "")
+      set(LLVM_DIR "${dir}" CACHE PATH "" FORCE)
+    endif()
+    find_package(LLVM CONFIG QUIET)
+    if(LLVM_FOUND AND LLVM_PACKAGE_VERSION VERSION_LESS ${LLVM_MIN})
+      set(LLVM_TOO_OLD "${LLVM_PACKAGE_VERSION}")
+      set(LLVM_FOUND FALSE)
+    endif()
   endif()
+endmacro()
+
+if(NOT LLVM_DIR)
+  file(GLOB LLVM_CANDIDATES
+       /usr/lib/llvm-*/lib/cmake/llvm /usr/lib/llvm-*/cmake
+       /usr/local/opt/llvm*/lib/cmake/llvm /opt/homebrew/opt/llvm*/lib/cmake/llvm)
+  list(SORT LLVM_CANDIDATES COMPARE NATURAL ORDER DESCENDING)
+  foreach(d IN LISTS LLVM_CANDIDATES)
+    try_llvm("${d}")
+  endforeach()
+  if(NOT LLVM_FOUND)
+    unset(LLVM_DIR CACHE)
+  endif()
+endif()
+try_llvm("")
+if(NOT LLVM_FOUND AND LLVM_TOO_OLD)
+  message(STATUS "LLVM ${LLVM_TOO_OLD} is too old (need ${LLVM_MIN}+); JIT disabled")
 endif()
 
 option(ENABLE_JIT "RSP binary translation via LLVM" ${LLVM_FOUND})
