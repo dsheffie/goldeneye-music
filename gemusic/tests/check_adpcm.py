@@ -9,6 +9,9 @@ sys.path.insert(0, os.path.join(here, '..', '..', 'tools'))
 import extract_music as E
 from ctl import parse_ctl
 
+# the helper sits next to this script in a Makefile build and in the build tree for
+# an out-of-tree cmake build, so let the caller say where it is
+adpcm_test = os.environ.get('ADPCM_TEST', os.path.join(here, 'adpcm_test'))
 rom = sys.argv[1] if len(sys.argv) > 1 else E.ROM
 d = open(rom, 'rb').read()
 bank = parse_ctl(d, E.INST_CTL)[0][0]
@@ -21,7 +24,7 @@ for inst in bank['instruments']:
 ok = 0
 for base, w in sorted(seen.items()):
     raw_name = '/tmp/gemusic_adpcm_%d.raw' % os.getpid()
-    subprocess.run([os.path.join(here, 'adpcm_test'), rom, '%x' % w['offset'], raw_name], check=True, stderr=subprocess.DEVNULL)
+    subprocess.run([adpcm_test, rom, '%x' % w['offset'], raw_name], check=True, stderr=subprocess.DEVNULL)
     raw = np.frombuffer(open(raw_name, 'rb').read(), dtype='>i2').astype(int)
     os.unlink(raw_name)
     n_frames = w['len'] // 9

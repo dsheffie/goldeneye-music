@@ -21,7 +21,20 @@ See [THEORY_OF_OPERATION.md](THEORY_OF_OPERATION.md) for how it works.
 
     git clone https://github.com/dsheffie/interp_mips ~/code/interp_mips   # plus its SoftFloat submodule
     git clone https://github.com/dsheffie/rsp-bt      ~/code/rsp-bt
-    cd gemusic && make            # INTERP= and RSPBT= override the sibling paths
+    cmake -S . -B build && cmake --build build -j
+
+Everything optional is detected and reported at configure time:
+
+| | needs | effect if missing |
+|---|---|---|
+| RSP JIT | LLVM 18 or later | RSP interpreter only, still ~19x real time |
+| `gemms` player | SDL2 | not built |
+| tests | `-DROM=/path/to/GoldenEye.z64` | not registered |
+
+`-DINTERP_MIPS=` and `-DRSPBT=` override the sibling checkout paths, and `-DENABLE_JIT=OFF`
+forces the interpreter.  `ctest` runs the ADPCM bit-exactness check.  A plain Makefile is
+also kept in `gemusic/` (it additionally has an x86-only AVX-512 backend, which the JIT
+supersedes: the JIT is faster and needs no ROM at build time).
 
 Generated files (the recompiled microcode, dumped LLVM IR, rendered audio) are derived
 from the ROM and are git-ignored on purpose.
