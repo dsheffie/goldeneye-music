@@ -49,6 +49,45 @@ hash of the ROM's microcode against the one it was generated from.  Output is
 byte-identical to the interpreter on all 63 sequences, with the RSP portion ~15x faster.
 Switching between the two build configurations needs a `make clean`.
 
+## gemms: an XMMS-style player
+
+![gemms](gemms.png)
+
+    make gemms                       # needs SDL2; interpreter backend, no LLVM or AVX-512
+    ./gemms -r GoldenEye.z64         # --scale 3 for a bigger window, --help for the rest
+
+`gemms` does not play files.  It runs the engine live, about 19x faster than real time on
+the plain interpreter, so looping tunes really loop and nothing but the ROM is needed.
+Tune lengths come from the sequence data (`ge_sequence_info`).  A looping tune plays two
+passes and fades before the next one starts; with REP lit it loops forever.  Jingles end
+on their own.  Seeking fast-forwards the engine (a backwards seek restarts the tune
+first), so a long jump takes a few seconds.  The spectrum analyser, LCD and every other
+pixel are drawn procedurally in the classic 275-pixel main-window layout; no skin
+bitmaps are used.
+
+Keys are the XMMS ones: `z` previous, `x` play, `c` pause, `v` stop, `b` next, plus `s`
+shuffle, `r` repeat, arrows for seek and volume, Enter to play the selected tune.
+
+## Building elsewhere
+
+Linux x86-64 is the tested platform.  The Makefile detects the OS, finds SoftFloat's
+build directory by wildcard, and on macOS adds Homebrew's include/lib paths and defines
+`MAP_NORESERVE` to 0 (macOS has no such flag; it is only a hint).  `gemms` defines
+`SDL_MAIN_HANDLED` so it does not need `SDL2main`.  You will need Homebrew's `boost`,
+`capstone`, `sdl2`, and `llvm` if you want `LLVM=1`.
+
+Two things still stand in the way of a macOS build, both in `interp_mips`:
+
+- `sgi_seeq.cc` includes `<linux/if.h>` and `<linux/if_tun.h>` for its TAP networking.
+  The TAP code is confined to the constructor, so guarding those includes and the
+  `TUNSETIFF` call with `#ifdef __linux__` is enough; the register model does not need
+  them.  The object cannot simply be left out of the link because `sgi_hpc` calls into it.
+- `helper.cc` includes `<libunwind.h>`.  macOS ships a compatible one in the SDK, so this
+  is expected to work, but it is untested.
+
+The `AVX512=1` backend is x86-64 only.  On Apple silicon use the default interpreter or
+the `LLVM=1` translator; both are portable and byte-identical.
+
 ## Verification
 
 `tests/adpcm_test` drives the microcode's ADPCM decoder with a hand-built command list.

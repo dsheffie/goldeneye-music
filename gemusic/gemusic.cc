@@ -9,6 +9,7 @@
 #include <boost/program_options.hpp>
 
 #include "guest.hh"
+#include "engine.hh"
 #include "rsp.hh"
 #ifdef GEMUSIC_AVX512
 #include "rsp_avx512.hh"
@@ -20,73 +21,6 @@
 #include "ge_addrs.hh"
 
 namespace po = boost::program_options;
-
-std::vector<uint8_t> inflate_1172(const uint8_t *p, size_t avail);
-
-static uint32_t be32(const uint8_t *p) {
-  return (static_cast<uint32_t>(p[0]) << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
-}
-
-static uint16_t be16(const uint8_t *p) {
-  return static_cast<uint16_t>((p[0] << 8) | p[1]);
-}
-
-/* Bring the synthesizer and one compact-sequence player up exactly the way
- * GoldenEye's sndInit does (0x80006a2c): same voice counts, same custom reverb. */
-static uint32_t audio_init(guest_t &g, const std::vector<uint8_t> &rom) {
-  g.call(GE_alHeapInit, G_ALHEAP, G_AUDIO_HEAP, G_AUDIO_HEAP_LEN);
-
-  memcpy(g.ptr(G_CTL), &rom[GE_ROM_INST_CTL], GE_ROM_INST_CTL_LEN);
-  memcpy(g.ptr(G_TBL), &rom[GE_ROM_INST_TBL], GE_ROM_INST_TBL_LEN);
-  g.call(GE_alBnkfNew, G_CTL, G_TBL);
-  uint32_t bank = g.rd32(G_CTL + 4);
-
-  /* ALSynConfig */
-  g.wr32(G_SYNCONFIG + 0, 0);
-  g.wr32(G_SYNCONFIG + 4, GE_MAX_PVOICES);
-  g.wr32(G_SYNCONFIG + 8, GE_MAX_UPDATES);
-  g.wr32(G_SYNCONFIG + 12, 0);
-  g.wr32(G_SYNCONFIG + 16, G_STUBS);              /* dmaproc (dmaNew) */
-  g.wr32(G_SYNCONFIG + 20, G_ALHEAP);
-  g.wr32(G_SYNCONFIG + 24, GE_OUTPUT_RATE);
-  g.wr8(G_SYNCONFIG + 28, GE_FX_TYPE);
-  g.wr32(G_SYNCONFIG + 32, GE_custom_fx_params);
-  g.call(GE_alInit, G_ALGLOBALS, G_SYNCONFIG);
-
-  /* ALSeqpConfig: no oscillator callbacks, as in the game */
-  g.wr32(G_SEQPCONFIG + 0, GE_SEQP_MAX_VOICES);
-  g.wr32(G_SEQPCONFIG + 4, GE_SEQP_MAX_EVENTS);
-  g.wr8(G_SEQPCONFIG + 8, GE_SEQP_MAX_CHANNELS);
-  g.wr8(G_SEQPCONFIG + 9, 0);
-  g.wr32(G_SEQPCONFIG + 12, G_ALHEAP);
-  g.wr32(G_SEQPCONFIG + 16, 0);
-  g.wr32(G_SEQPCONFIG + 20, 0);
-  g.wr32(G_SEQPCONFIG + 24, 0);
-  g.call(GE_alCSPNew, G_CSPLAYER, G_SEQPCONFIG);
-  g.call(GE_alCSPSetBank, G_CSPLAYER, bank);
-  return bank;
-}
-
-static void start_sequence(guest_t &g, const std::vector<uint8_t> &rom, int seq) {
-  const uint8_t *t = &rom[GE_ROM_SEQ_TABLE];
-  int n_seqs = be16(t);
-  if(seq < 0 or seq >= n_seqs) {
-    fprintf(stderr, "sequence %d out of range (0..%d)\n", seq, n_seqs-1);
-    exit(-1);
-  }
-  const uint8_t *e = t + 4 + 8*seq;
-  uint32_t offs = be32(e);
-  uint16_t clen = be16(e + 6);
-  std::vector<uint8_t> raw = inflate_1172(t + offs, clen);
-  memcpy(g.ptr(G_SEQDATA), raw.data(), raw.size());
-  g.call(GE_alCSeqNew, G_CSEQ, G_SEQDATA);
-  g.call(GE_alCSPSetSeq, G_CSPLAYER, G_CSEQ);
-  /* the game's musicSetVolume (0x8000703c): master volume scaled by a per-sequence
-   * Q15 table, both read here from the ROM's own data segment */
-  uint32_t vol = (static_cast<uint32_t>(g.rd16(GE_music_volume)) * g.rd16(GE_track_volumes + 2*seq)) >> 15;
-  g.call(GE_alCSPSetVol, G_CSPLAYER, vol);
-  g.call(GE_alCSPPlay, G_CSPLAYER);
-}
 
 int main(int argc, char *argv[]) {
   std::string rom_name = "GoldenEye.z64", out_name = "out.wav";
@@ -132,8 +66,8 @@ int main(int argc, char *argv[]) {
   setenv("FP_NODIVTRAP", "1", 1);
 
   guest_t g(rom);
-  audio_init(g, rom);
-  start_sequence(g, rom, seq);
+  ge_audio_init(g, rom);
+  ge_start_sequence(g, rom, seq);
 
   rsp_t rsp;
   rsp.rdram = g.ptr(0x80000000u);

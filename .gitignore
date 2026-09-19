@@ -12,6 +12,7 @@ rsp_*.ll
 # build output
 obj/
 gemusic/gemusic
+gemusic/gemms
 gemusic/tests/adpcm_test
 __pycache__/
 *.o
