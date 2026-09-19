@@ -76,15 +76,33 @@ void ge_start_sequence(guest_t &g, const std::vector<uint8_t> &rom, int seq) {
 
 /* ---- engine_t: one frame of audio at a time, portable interpreter backend ---- */
 
-engine_t::engine_t(const std::vector<uint8_t> &rom) : rom(rom) {
+engine_t::engine_t(const std::vector<uint8_t> &rom, bool use_jit) : rom(rom) {
+#ifdef GEMUSIC_LLVM
+  if(use_jit) {
+    bt = new rspbt();
+  }
+#else
+  (void)use_jit;
+#endif
   /* interp_mips mirrors the r9999 RTL, where div/sqrt trap to an OS soft-float
    * emulator.  There is no OS here; this knob makes the ISS execute them itself. */
   setenv("FP_NODIVTRAP", "1", 1);
 }
 
 engine_t::~engine_t() {
+#ifdef GEMUSIC_LLVM
+  delete bt;
+#endif
   delete rsp;
   delete g;
+}
+
+bool engine_t::jit_active() const {
+#ifdef GEMUSIC_LLVM
+  return bt != nullptr;
+#else
+  return false;
+#endif
 }
 
 int engine_t::n_sequences() const {
@@ -99,6 +117,14 @@ void engine_t::start(int seq) {
   rsp->rdram = g->ptr(0x80000000u);
   ge_audio_init(*g, rom);
   ge_start_sequence(*g, rom, seq);
+#ifdef GEMUSIC_LLVM
+  /* the audio ABI's command dispatch table sits at +0x10 in the microcode's data:
+   * 16 big-endian handler addresses.  Only a hint for the translator's jr targets. */
+  jr_hints.clear();
+  for(int i = 0; i < 16; i++) {
+    jr_hints.push_back(g->rd16(GE_aspMainData + 0x10 + 2*i));
+  }
+#endif
 }
 
 void engine_t::render(int16_t *out) {
@@ -120,8 +146,20 @@ void engine_t::render(int16_t *out) {
     p[2] = static_cast<uint8_t>(task[i] >> 8);
     p[3] = static_cast<uint8_t>(task[i]);
   }
-  memcpy(rsp->mem + 0x1000, g->ptr(GE_rspbootText), GE_rspbootText_LEN);
-  rsp->run(0);
+#ifdef GEMUSIC_LLVM
+  if(bt != nullptr) {
+    /* rspboot's job, done natively: microcode data to DMEM, text to IMEM 0x080 */
+    memcpy(rsp->mem, g->ptr(GE_aspMainData), 0x800);
+    memcpy(rsp->mem + 0x1080, g->ptr(GE_aspMainText), 0xf80);
+    rsp->r[1] = 0xfc0;
+    bt->run(*rsp, 0x080, jr_hints);
+  }
+  else
+#endif
+  {
+    memcpy(rsp->mem + 0x1000, g->ptr(GE_rspbootText), GE_rspbootText_LEN);
+    rsp->run(0);
+  }
   const uint8_t *o = g->ptr(G_OUTBUF);
   for(int i = 0; i < 2*GE_FRAME_SAMPLES; i++) {
     out[i] = static_cast<int16_t>((o[2*i] << 8) | o[2*i+1]);

@@ -53,8 +53,13 @@ Switching between the two build configurations needs a `make clean`.
 
 ![gemms](gemms.png)
 
-    make gemms                       # needs SDL2; interpreter backend, no LLVM or AVX-512
+    cmake -S .. -B ../build && cmake --build ../build -j     # or: make gemms
     ./gemms -r GoldenEye.z64         # --scale 3 for a bigger window, --help for the rest
+
+In a build with the LLVM translator `gemms` uses it, which matters only for seeking --
+a seek fast-forwards the engine, and a 90-second one takes 1.9 s instead of 4.7 s.
+`--no-jit` forces the interpreter.  Playback itself needs about 3% of one core either
+way, so the plain Makefile build with no LLVM is perfectly usable.
 
 `gemms` does not play files.  It runs the engine live, about 19x faster than real time on
 the plain interpreter, so looping tunes really loop and nothing but the ROM is needed.

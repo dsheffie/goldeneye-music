@@ -6,6 +6,9 @@
 
 #include "guest.hh"
 #include "rsp.hh"
+#ifdef GEMUSIC_LLVM
+#include "rspbt.hh"
+#endif
 
 std::vector<uint8_t> inflate_1172(const uint8_t *p, size_t avail);
 uint32_t ge_audio_init(guest_t &g, const std::vector<uint8_t> &rom);
@@ -25,12 +28,19 @@ struct engine_t {
   const std::vector<uint8_t> &rom;
   guest_t *g = nullptr;
   rsp_t *rsp = nullptr;
+#ifdef GEMUSIC_LLVM
+  rspbt *bt = nullptr;                 /* null unless the JIT was requested and built in */
+  std::vector<uint32_t> jr_hints;
+#endif
 
-  engine_t(const std::vector<uint8_t> &rom);
+  /* use_jit is honoured only in a build with the LLVM translator; everything else
+   * falls back to the RSP interpreter, which is fast enough for real-time playback. */
+  engine_t(const std::vector<uint8_t> &rom, bool use_jit = false);
   ~engine_t();
   int n_sequences() const;
   void start(int seq);
   void render(int16_t *out);           /* out[2*GE_FRAME_SAMPLES], interleaved L/R */
+  bool jit_active() const;             /* what the engine is actually using */
 };
 
 #endif

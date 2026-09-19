@@ -24,6 +24,7 @@
  * shim (which on macOS would redefine main and pull in SDL2main) */
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
+#include <chrono>
 
 #include "engine.hh"
 #include "ge_addrs.hh"
@@ -147,9 +148,14 @@ static void engine_thread(player_t *pp, engine_t *eng) {
 	n_silent = 0;
       }
       p.seeking.store(target > rendered);
+      auto seek_t0 = std::chrono::steady_clock::now();
       while(rendered + GE_FRAME_SAMPLES <= target and not(p.quit.load())) {   /* fast-forward */
 	eng->render(frame);
 	rendered += GE_FRAME_SAMPLES;
+      }
+      if(p.seeking.load()) {
+	fprintf(stderr, "gemms: seek to %.1f s took %.2f s\n", seek / 1.0,
+		std::chrono::duration<double>(std::chrono::steady_clock::now() - seek_t0).count());
       }
       p.seeking.store(false);
       p.ring_r.store(p.ring_w.load());              /* drop queued audio */
@@ -660,6 +666,7 @@ int main(int argc, char *argv[]) {
   std::string rom_name = "GoldenEye.z64", shot;
   int scale = 2, start_track = 1;
   double start_at = 0.0;
+  bool use_jit = true;
   player_t *pp = new player_t();
   player_t &p = *pp;
   try {
@@ -673,10 +680,12 @@ int main(int argc, char *argv[]) {
       ("passes", po::value<int>(&p.loop_passes), "passes through a looping tune before it fades (default 2)")
       ("fade", po::value<double>(&p.fade_seconds), "fade-out seconds (default 8)")
       ("screenshot", po::value<std::string>(&shot), "draw one frame to this .bmp and exit (no window, no audio)")
+      ("no-jit", "use the RSP interpreter even in a build with the LLVM translator")
       ;
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
     po::notify(vm);
+    use_jit = vm.count("no-jit") == 0;
     if(vm.count("help")) {
       std::cout << desc << "\nkeys: z prev, x play, c pause, v stop, b next, s shuffle, r repeat,\n"
 		<< "      left/right seek 5 s, up/down volume, enter plays the selected tune, q quits\n";
@@ -695,7 +704,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "%s is not a big-endian GoldenEye 007 (NGEE) image\n", rom_name.c_str());
     return -1;
   }
-  engine_t eng(rom);
+  engine_t eng(rom, use_jit);
   ui_t ui;
   for(int s = 0; s < eng.n_sequences() and s < 63; s++) {
     seq_info_t info = ge_sequence_info(rom, s);
@@ -893,6 +902,7 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  fprintf(stderr, "gemms: RSP backend %s\n", eng.jit_active() ? "llvm" : "interpreter");
   fprintf(stderr, "gemms: stopped on playlist entry %d (%s) at %s, state %s\n", ui.cur + 1,
 	  ui.tracks.empty() ? "-" : ui.tracks[ui.cur].title.c_str(),
 	  mmss(static_cast<double>(p.played.load()) / GE_OUTPUT_RATE).c_str(),
