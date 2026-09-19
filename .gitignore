@@ -1,0 +1,20 @@
+# Nothing derived from a ROM is ever committed: not the ROM, not extracted or
+# rendered audio, not code generated from the microcode, not dumped IR.
+*.z64
+*.n64
+*.v64
+music/
+RCP_STUB_SPEC.md
+rsp_*.ll
+*.wav
+*.flac
+
+# build output
+obj/
+gemusic/gemusic
+gemusic/tests/adpcm_test
+__pycache__/
+*.o
+*.d
+*.pyc
+*~
