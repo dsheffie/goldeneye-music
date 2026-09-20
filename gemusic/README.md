@@ -106,7 +106,7 @@ multiply-accumulate ops end to end.
   libaudio game needs only a new copy of that file (and possibly more RSP opcodes:
   `rsp.cc` implements what rspboot + aspMain execute and dies loudly on anything else).
 - GoldenEye's code is FR=0 (it builds double constants with `mtc1` to odd/even register
-  pairs), so the guest runs with Status.FR clear.
+  pairs), so the R4300 runs with Status.FR clear.
 - `interp_mips` mirrors the r9999 RTL, where `div`/`sqrt` trap to an OS soft-float
   emulator.  There is no OS here, so `main()` sets its `FP_NODIVTRAP` knob.
 - Dependencies: zlib, boost::program_options, plus whatever interp_mips links
