@@ -27,9 +27,9 @@ endif
 # interp_mips is an SGI Indy simulator; we want only its R4x00 CPU core.  iss_stubs.cc
 # supplies the handful of device / instrumentation symbols the core still references
 # so the Indy machine (including the Linux-only sgi_seeq.cc) stays out of the link.
-ISS = disassemble helper interpret sparse_mem saveState
+ISS = helper interpret sparse_mem
 ISS_OBJ = $(addprefix obj/iss_,$(addsuffix .o,$(ISS))) obj/iss_stubs.o
-OBJ = obj/gemusic.o obj/engine.o obj/guest.o obj/rsp.o
+OBJ = obj/gemusic.o obj/engine.o obj/r4300.o obj/rsp.o
 
 # optional x86 backend: the ROM's audio microcode statically recompiled to AVX-512.
 # The translation is derived from the ROM, so it is generated here, never checked in.
@@ -71,7 +71,7 @@ obj/iss_%.o: $(INTERP)/%.cc
 
 # gemms: the XMMS-style live player (needs SDL2).  Interpreter backend only, so it has
 # no LLVM or AVX-512 requirement.  make gemms
-GEMMS_OBJ = obj/gemms.o obj/engine_plain.o obj/guest.o obj/rsp.o
+GEMMS_OBJ = obj/gemms.o obj/engine_plain.o obj/r4300.o obj/rsp.o
 
 # sdl2-config if present, otherwise pkg-config
 SDL_CFLAGS ?= $(shell sdl2-config --cflags 2>/dev/null || pkg-config --cflags sdl2)
@@ -99,7 +99,7 @@ obj/%.o: %.cc
 	@mkdir -p obj
 	$(CXX) $(CXXFLAGS) $(AVX512_FLAGS) -MMD -c $< -o $@
 
-tests/adpcm_test: obj/adpcm_test.o obj/guest.o obj/rsp.o $(ISS_OBJ)
+tests/adpcm_test: obj/adpcm_test.o obj/r4300.o obj/rsp.o $(ISS_OBJ)
 	$(CXX) -o $@ $^ $(SOFTFLOAT) $(LIBS)
 
 obj/adpcm_test.o: tests/adpcm_test.cc

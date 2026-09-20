@@ -19,41 +19,41 @@ static uint16_t be16(const uint8_t *p) {
 
 /* Bring the synthesizer and one compact-sequence player up exactly the way
  * GoldenEye's sndInit does (0x80006a2c): same voice counts, same custom reverb. */
-uint32_t ge_audio_init(guest_t &g, const std::vector<uint8_t> &rom) {
-  g.call(GE_alHeapInit, G_ALHEAP, G_AUDIO_HEAP, G_AUDIO_HEAP_LEN);
+uint32_t ge_audio_init(r4300_t &g, const std::vector<uint8_t> &rom) {
+  g.call(GE_alHeapInit, RAM_ALHEAP, RAM_AUDIO_HEAP, RAM_AUDIO_HEAP_LEN);
 
-  memcpy(g.ptr(G_CTL), &rom[GE_ROM_INST_CTL], GE_ROM_INST_CTL_LEN);
-  memcpy(g.ptr(G_TBL), &rom[GE_ROM_INST_TBL], GE_ROM_INST_TBL_LEN);
-  g.call(GE_alBnkfNew, G_CTL, G_TBL);
-  uint32_t bank = g.rd32(G_CTL + 4);
+  memcpy(g.ptr(RAM_CTL), &rom[GE_ROM_INST_CTL], GE_ROM_INST_CTL_LEN);
+  memcpy(g.ptr(RAM_TBL), &rom[GE_ROM_INST_TBL], GE_ROM_INST_TBL_LEN);
+  g.call(GE_alBnkfNew, RAM_CTL, RAM_TBL);
+  uint32_t bank = g.rd32(RAM_CTL + 4);
 
   /* ALSynConfig */
-  g.wr32(G_SYNCONFIG + 0, 0);
-  g.wr32(G_SYNCONFIG + 4, GE_MAX_PVOICES);
-  g.wr32(G_SYNCONFIG + 8, GE_MAX_UPDATES);
-  g.wr32(G_SYNCONFIG + 12, 0);
-  g.wr32(G_SYNCONFIG + 16, G_STUBS);              /* dmaproc (dmaNew) */
-  g.wr32(G_SYNCONFIG + 20, G_ALHEAP);
-  g.wr32(G_SYNCONFIG + 24, GE_OUTPUT_RATE);
-  g.wr8(G_SYNCONFIG + 28, GE_FX_TYPE);
-  g.wr32(G_SYNCONFIG + 32, GE_custom_fx_params);
-  g.call(GE_alInit, G_ALGLOBALS, G_SYNCONFIG);
+  g.wr32(RAM_SYNCONFIG + 0, 0);
+  g.wr32(RAM_SYNCONFIG + 4, GE_MAX_PVOICES);
+  g.wr32(RAM_SYNCONFIG + 8, GE_MAX_UPDATES);
+  g.wr32(RAM_SYNCONFIG + 12, 0);
+  g.wr32(RAM_SYNCONFIG + 16, RAM_STUBS);              /* dmaproc (dmaNew) */
+  g.wr32(RAM_SYNCONFIG + 20, RAM_ALHEAP);
+  g.wr32(RAM_SYNCONFIG + 24, GE_OUTPUT_RATE);
+  g.wr8(RAM_SYNCONFIG + 28, GE_FX_TYPE);
+  g.wr32(RAM_SYNCONFIG + 32, GE_custom_fx_params);
+  g.call(GE_alInit, RAM_ALGLOBALS, RAM_SYNCONFIG);
 
   /* ALSeqpConfig: no oscillator callbacks, as in the game */
-  g.wr32(G_SEQPCONFIG + 0, GE_SEQP_MAX_VOICES);
-  g.wr32(G_SEQPCONFIG + 4, GE_SEQP_MAX_EVENTS);
-  g.wr8(G_SEQPCONFIG + 8, GE_SEQP_MAX_CHANNELS);
-  g.wr8(G_SEQPCONFIG + 9, 0);
-  g.wr32(G_SEQPCONFIG + 12, G_ALHEAP);
-  g.wr32(G_SEQPCONFIG + 16, 0);
-  g.wr32(G_SEQPCONFIG + 20, 0);
-  g.wr32(G_SEQPCONFIG + 24, 0);
-  g.call(GE_alCSPNew, G_CSPLAYER, G_SEQPCONFIG);
-  g.call(GE_alCSPSetBank, G_CSPLAYER, bank);
+  g.wr32(RAM_SEQPCONFIG + 0, GE_SEQP_MAX_VOICES);
+  g.wr32(RAM_SEQPCONFIG + 4, GE_SEQP_MAX_EVENTS);
+  g.wr8(RAM_SEQPCONFIG + 8, GE_SEQP_MAX_CHANNELS);
+  g.wr8(RAM_SEQPCONFIG + 9, 0);
+  g.wr32(RAM_SEQPCONFIG + 12, RAM_ALHEAP);
+  g.wr32(RAM_SEQPCONFIG + 16, 0);
+  g.wr32(RAM_SEQPCONFIG + 20, 0);
+  g.wr32(RAM_SEQPCONFIG + 24, 0);
+  g.call(GE_alCSPNew, RAM_CSPLAYER, RAM_SEQPCONFIG);
+  g.call(GE_alCSPSetBank, RAM_CSPLAYER, bank);
   return bank;
 }
 
-void ge_start_sequence(guest_t &g, const std::vector<uint8_t> &rom, int seq) {
+void ge_start_sequence(r4300_t &g, const std::vector<uint8_t> &rom, int seq) {
   const uint8_t *t = &rom[GE_ROM_SEQ_TABLE];
   int n_seqs = be16(t);
   if(seq < 0 or seq >= n_seqs) {
@@ -64,14 +64,14 @@ void ge_start_sequence(guest_t &g, const std::vector<uint8_t> &rom, int seq) {
   uint32_t offs = be32(e);
   uint16_t clen = be16(e + 6);
   std::vector<uint8_t> raw = inflate_1172(t + offs, clen);
-  memcpy(g.ptr(G_SEQDATA), raw.data(), raw.size());
-  g.call(GE_alCSeqNew, G_CSEQ, G_SEQDATA);
-  g.call(GE_alCSPSetSeq, G_CSPLAYER, G_CSEQ);
+  memcpy(g.ptr(RAM_SEQDATA), raw.data(), raw.size());
+  g.call(GE_alCSeqNew, RAM_CSEQ, RAM_SEQDATA);
+  g.call(GE_alCSPSetSeq, RAM_CSPLAYER, RAM_CSEQ);
   /* the game's musicSetVolume (0x8000703c): master volume scaled by a per-sequence
    * Q15 table, both read here from the ROM's own data segment */
   uint32_t vol = (static_cast<uint32_t>(g.rd16(GE_music_volume)) * g.rd16(GE_track_volumes + 2*seq)) >> 15;
-  g.call(GE_alCSPSetVol, G_CSPLAYER, vol);
-  g.call(GE_alCSPPlay, G_CSPLAYER);
+  g.call(GE_alCSPSetVol, RAM_CSPLAYER, vol);
+  g.call(GE_alCSPPlay, RAM_CSPLAYER);
 }
 
 /* ---- engine_t: one frame of audio at a time, portable interpreter backend ---- */
@@ -112,7 +112,7 @@ int engine_t::n_sequences() const {
 void engine_t::start(int seq) {
   delete rsp;
   delete g;
-  g = new guest_t(rom);                  /* a fresh machine per tune: no state leaks */
+  g = new r4300_t(rom);                  /* a fresh machine per tune: no state leaks */
   rsp = new rsp_t();
   rsp->rdram = g->ptr(0x80000000u);
   ge_audio_init(*g, rom);
@@ -128,15 +128,15 @@ void engine_t::start(int seq) {
 }
 
 void engine_t::render(int16_t *out) {
-  g->call(GE_alAudioFrame, G_CMDLIST, G_CMDLEN, G_OUTBUF & 0x1fffffffu, GE_FRAME_SAMPLES);
-  uint32_t n_cmds = g->rd32(G_CMDLEN);
+  g->call(GE_alAudioFrame, RAM_CMDLIST, RAM_CMDLEN, RAM_OUTBUF & 0x1fffffffu, GE_FRAME_SAMPLES);
+  uint32_t n_cmds = g->rd32(RAM_CMDLEN);
   const uint32_t task[16] = {
     2, 0,
     GE_rspbootText & 0x1fffffffu, GE_rspbootText_LEN,
     GE_aspMainText & 0x1fffffffu, 0x1000,
     GE_aspMainData & 0x1fffffffu, 0x800,
     0, 0, 0, 0,
-    G_CMDLIST & 0x1fffffffu, n_cmds * 8,
+    RAM_CMDLIST & 0x1fffffffu, n_cmds * 8,
     0, 0
   };
   for(int i = 0; i < 16; i++) {
@@ -160,7 +160,7 @@ void engine_t::render(int16_t *out) {
     memcpy(rsp->mem + 0x1000, g->ptr(GE_rspbootText), GE_rspbootText_LEN);
     rsp->run(0);
   }
-  const uint8_t *o = g->ptr(G_OUTBUF);
+  const uint8_t *o = g->ptr(RAM_OUTBUF);
   for(int i = 0; i < 2*GE_FRAME_SAMPLES; i++) {
     out[i] = static_cast<int16_t>((o[2*i] << 8) | o[2*i+1]);
   }

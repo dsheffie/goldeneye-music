@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gemms</title>
+<style>
+  :root { color-scheme: dark; --bg:#12151d; --fg:#c8d0e4; --dim:#6a7288; --edge:#2a3040; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+               font:14px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+  body { display:flex; flex-direction:column; align-items:center; justify-content:center;
+         gap:16px; padding:16px; box-sizing:border-box; text-align:center; }
+  canvas { image-rendering:pixelated; background:#000; border:1px solid var(--edge);
+           max-width:100%; touch-action:none; }
+  #drop { border:1px dashed var(--edge); border-radius:8px; padding:12px 18px; max-width:560px; }
+  #drop.over { border-color:#00e800; color:#00e800; }
+  button { font:inherit; color:var(--fg); background:#2a3040; border:1px solid var(--edge);
+           border-radius:6px; padding:6px 12px; cursor:pointer; }
+  button:hover { background:#39415a; }
+  p { margin:6px 0; }
+  .dim { color:var(--dim); font-size:12px; }
+  #needtap { display:none; background:#00e800; color:#000; font-weight:bold;
+             border-radius:6px; padding:10px 16px; cursor:pointer; }
+  a { color:#7f9; }
+</style>
+</head>
+<body>
+
+<canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+
+<div id="needtap">TAP HERE TO START AUDIO</div>
+
+<!-- iOS silences a bare AudioContext when the ringer switch is on silent, but not a
+     page that is also playing a media element.  This silent loop is what promotes the
+     audio session so the player is audible with the switch either way. -->
+<audio id="unsilence" loop playsinline preload="auto" src="data:audio/wav;base64,UklGRmQGAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YUAGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"></audio>
+
+<div id="drop">
+  <p><button id="pick">Choose a ROM</button> or drop one here</p>
+  <p class="dim">
+    Needs your own big-endian GoldenEye 007 (NGEE) <code>.z64</code>.
+    It is read in your browser and never uploaded.
+  </p>
+  <p class="dim" id="status">No ROM loaded.</p>
+  <p class="dim" id="diag">loading...</p>
+</div>
+
+<input id="file" type="file" accept=".z64,.n64,.v64" hidden>
+
+<script>
+  // Replaced at build time.  Every asset is fetched with this as a query string so
+  // a cached gemms.js/wasm can never be paired with a newer index.html.
+  window.GEMMS_V = '__GEMMS_V__';
+  window.GEMMS_Q = '__GEMMS_Q__';
+
+  var Module = {
+    locateFile: function (path, prefix) { return prefix + path + '?v=' + window.GEMMS_Q; },
+    canvas: document.getElementById('canvas'),
+    print: function (t) { console.log(t); },
+    printErr: function (t) { console.warn(t); },
+  };
+
+  function loadRom(file) {
+    var status = document.getElementById('status');
+    status.textContent = 'Reading ' + file.name + '...';
+    file.arrayBuffer().then(function (buf) {
+      var bytes = new Uint8Array(buf);
+      // hand the bytes to wasm: allocate, copy, call, free
+      var p = Module._malloc(bytes.length);
+      Module.HEAPU8.set(bytes, p);
+      Module.ccall('gemms_load_rom', null, ['number', 'number'], [p, bytes.length]);
+      Module._free(p);
+      status.textContent = file.name + ' (' + (bytes.length >> 20) + ' MB) loaded.';
+      resumeAudio();
+      Module.canvas.focus();
+    }).catch(function (e) { status.textContent = 'Could not read that file: ' + e; });
+  }
+
+  // Audio is driven from here rather than through SDL: iOS will only start an
+  // AudioContext created inside a real user gesture, so we make one on the first
+  // tap and pull PCM straight out of wasm.
+  var ctx = null, node = null, buf = 0, bufFrames = 0, ready = false;
+  Module.onRuntimeInitialized = function () { ready = true; };
+
+  function startAudio() {
+    if (!ready) { return; }
+    if (!ctx) {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) { return; }
+      ctx = new AC();
+      bufFrames = 4096;
+      buf = Module._malloc(bufFrames * 2 * 4);           // interleaved stereo float32
+      node = ctx.createScriptProcessor(bufFrames, 0, 2);
+      node.onaudioprocess = function (e) {
+        var n = e.outputBuffer.length;
+        Module._gemms_pull(buf, n, ctx.sampleRate | 0);
+        var l = e.outputBuffer.getChannelData(0), r = e.outputBuffer.getChannelData(1);
+        var base = buf >> 2;
+        for (var i = 0; i < n; i++) {
+          l[i] = Module.HEAPF32[base + 2 * i];
+          r[i] = Module.HEAPF32[base + 2 * i + 1];
+        }
+      };
+      node.connect(ctx.destination);
+    }
+    if (ctx.state !== 'running') { ctx.resume().catch(function () {}); }
+    var el = document.getElementById('unsilence');
+    if (el && el.paused) { el.volume = 0.0; el.play().catch(function () {}); }
+    updateAudioBanner();
+  }
+  var resumeAudio = startAudio;
+
+  function updateAudioBanner() {
+    var need = document.getElementById('needtap');
+    need.style.display = (ctx && ctx.state === 'running') ? 'none' : 'block';
+    var diag = document.getElementById('diag');
+    if (!ready) { diag.textContent = 'loading...'; return; }
+    function num(name) {
+      var f = Module['_gemms_' + name];
+      return (typeof f === 'function') ? f() : '?';
+    }
+    var id = '?';
+    try {
+      if (Module.UTF8ToString && Module._gemms_build_id) {
+        id = Module.UTF8ToString(Module._gemms_build_id());
+      }
+    } catch (e) { /* older build without the export */ }
+    diag.textContent =
+      'page ' + window.GEMMS_V + ' / wasm ' + id +
+      ' | audio ' + (ctx ? ctx.state + ' @' + Math.round(ctx.sampleRate) + 'Hz' : 'not started') +
+      ' | buf ' + num('ring_fill') + ' played ' + num('played_frames') +
+      ' | loop ' + num('ticks') + ' eng ' + num('rendered') + ' pull ' + num('pulls');
+  }
+  ['pointerdown', 'touchend', 'mousedown', 'click', 'keydown'].forEach(function (n) {
+    document.addEventListener(n, startAudio, true);
+  });
+  setInterval(updateAudioBanner, 500);
+  document.getElementById('needtap').onclick = startAudio;
+
+  document.getElementById('pick').onclick = function () {
+    resumeAudio();
+    document.getElementById('file').click();
+  };
+  document.getElementById('file').onchange = function (e) {
+    resumeAudio();
+    if (e.target.files[0]) { loadRom(e.target.files[0]); }
+  };
+
+  var drop = document.getElementById('drop');
+  ['dragenter', 'dragover'].forEach(function (n) {
+    document.addEventListener(n, function (e) { e.preventDefault(); drop.classList.add('over'); });
+  });
+  ['dragleave', 'drop'].forEach(function (n) {
+    document.addEventListener(n, function (e) { e.preventDefault(); drop.classList.remove('over'); });
+  });
+  document.addEventListener('drop', function (e) {
+    if (e.dataTransfer.files[0]) { loadRom(e.dataTransfer.files[0]); }
+  });
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

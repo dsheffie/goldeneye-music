@@ -11,6 +11,8 @@ rsp_*.ll
 
 # build output
 obj/
+build/
+gemusic/web/dist/
 gemusic/gemusic
 gemusic/gemms
 gemusic/tests/adpcm_test

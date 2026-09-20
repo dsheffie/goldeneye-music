@@ -23,19 +23,45 @@ foreach(d IN ITEMS "${INTERP_MIPS}" "${RSPBT}")
   endif()
 endforeach()
 
-# SoftFloat builds into a target-named directory; take whichever one exists.
-file(GLOB SOFTFLOAT_LIB "${INTERP_MIPS}/softfloat/build/*/softfloat.a")
-list(GET SOFTFLOAT_LIB 0 SOFTFLOAT_LIB)
+# SoftFloat builds into a target-named directory.  There may be several side by
+# side (a native one and a wasm one), so pick one that matches what we are building.
 if(NOT SOFTFLOAT_LIB)
-  message(FATAL_ERROR "SoftFloat is not built: run make in ${INTERP_MIPS}/softfloat/build/<target>")
+  if(EMSCRIPTEN)
+    file(GLOB SOFTFLOAT_CANDIDATES "${INTERP_MIPS}/softfloat/build/*emscripten*/softfloat.a"
+                                   "${INTERP_MIPS}/softfloat/build/*wasm*/softfloat.a")
+  else()
+    file(GLOB SOFTFLOAT_ALL "${INTERP_MIPS}/softfloat/build/*/softfloat.a")
+    set(SOFTFLOAT_CANDIDATES "")
+    foreach(f IN LISTS SOFTFLOAT_ALL)
+      if(NOT f MATCHES "emscripten|wasm")
+        list(APPEND SOFTFLOAT_CANDIDATES "${f}")
+      endif()
+    endforeach()
+  endif()
+  list(GET SOFTFLOAT_CANDIDATES 0 SOFTFLOAT_LIB)
 endif()
+if(NOT SOFTFLOAT_LIB OR SOFTFLOAT_LIB STREQUAL "NOTFOUND")
+  message(FATAL_ERROR "no SoftFloat for this target under ${INTERP_MIPS}/softfloat/build\n"
+                      "  build it there, or pass -DSOFTFLOAT_LIB=/path/to/softfloat.a")
+endif()
+message(STATUS "  softfloat ......... ${SOFTFLOAT_LIB}")
 
 # ---------------------------------------------------------------- dependencies
 
-find_package(ZLIB REQUIRED)
-find_package(Boost REQUIRED COMPONENTS program_options serialization)
+if(EMSCRIPTEN)
+  add_compile_options(-sUSE_ZLIB=1)
+  add_link_options(-sUSE_ZLIB=1)
+else()
+  find_package(ZLIB REQUIRED)
+endif()
+# The native command-line front end links boost::program_options.  Nothing else
+# needs boost except sim_bitvec.hh's use of hash_combine, which the wasm build
+# satisfies with a small shim (gemusic/wasm) rather than putting /usr/include ahead
+# of emscripten's own sysroot.
+if(NOT EMSCRIPTEN)
+  find_package(Boost REQUIRED COMPONENTS program_options)
+endif()
 
-find_library(CAPSTONE_LIB capstone REQUIRED)
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
   pkg_check_modules(SDL2 QUIET sdl2)
@@ -68,21 +94,24 @@ macro(try_llvm dir)
   endif()
 endmacro()
 
-if(NOT LLVM_DIR)
-  file(GLOB LLVM_CANDIDATES
-       /usr/lib/llvm-*/lib/cmake/llvm /usr/lib/llvm-*/cmake
-       /usr/local/opt/llvm*/lib/cmake/llvm /opt/homebrew/opt/llvm*/lib/cmake/llvm)
-  list(SORT LLVM_CANDIDATES COMPARE NATURAL ORDER DESCENDING)
-  foreach(d IN LISTS LLVM_CANDIDATES)
-    try_llvm("${d}")
-  endforeach()
-  if(NOT LLVM_FOUND)
-    unset(LLVM_DIR CACHE)
+# a native LLVM cannot be linked into wasm, and the interpreter is fast enough there
+if(NOT EMSCRIPTEN)
+  if(NOT LLVM_DIR)
+    file(GLOB LLVM_CANDIDATES
+         /usr/lib/llvm-*/lib/cmake/llvm /usr/lib/llvm-*/cmake
+         /usr/local/opt/llvm*/lib/cmake/llvm /opt/homebrew/opt/llvm*/lib/cmake/llvm)
+    list(SORT LLVM_CANDIDATES COMPARE NATURAL ORDER DESCENDING)
+    foreach(d IN LISTS LLVM_CANDIDATES)
+      try_llvm("${d}")
+    endforeach()
+    if(NOT LLVM_FOUND)
+      unset(LLVM_DIR CACHE)
+    endif()
   endif()
-endif()
-try_llvm("")
-if(NOT LLVM_FOUND AND LLVM_TOO_OLD)
-  message(STATUS "LLVM ${LLVM_TOO_OLD} is too old (need ${LLVM_MIN}+); JIT disabled")
+  try_llvm("")
+  if(NOT LLVM_FOUND AND LLVM_TOO_OLD)
+    message(STATUS "LLVM ${LLVM_TOO_OLD} is too old (need ${LLVM_MIN}+); JIT disabled")
+  endif()
 endif()
 
 option(ENABLE_JIT "RSP binary translation via LLVM" ${LLVM_FOUND})
@@ -96,17 +125,23 @@ set(ROM "" CACHE FILEPATH "a GoldenEye 007 (NGEE) ROM; only needed to run the te
 
 # interp_mips is an SGI Indy simulator; iss_stubs.cc lets us link only its CPU core.
 add_library(iss_core STATIC
-  ${INTERP_MIPS}/interpret.cc ${INTERP_MIPS}/sparse_mem.cc ${INTERP_MIPS}/helper.cc
-  ${INTERP_MIPS}/disassemble.cc ${INTERP_MIPS}/saveState.cc
-  gemusic/iss_stubs.cc)
+  ${INTERP_MIPS}/interpret.cc ${INTERP_MIPS}/helper.cc gemusic/iss_stubs.cc
+  $<$<NOT:$<BOOL:${EMSCRIPTEN}>>:${INTERP_MIPS}/sparse_mem.cc>
+  $<$<BOOL:${EMSCRIPTEN}>:${CMAKE_CURRENT_SOURCE_DIR}/gemusic/sparse_mem_wasm.cc>)
 target_include_directories(iss_core PUBLIC ${INTERP_MIPS} ${INTERP_MIPS}/softfloat/source/include)
-target_link_libraries(iss_core PUBLIC ${SOFTFLOAT_LIB} ${CAPSTONE_LIB}
-  Boost::program_options Boost::serialization ZLIB::ZLIB)
+if(EMSCRIPTEN)
+  target_include_directories(iss_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/gemusic/wasm)
+  target_compile_definitions(iss_core PUBLIC NO_BOOST_SERIALIZATION)
+endif()
+target_link_libraries(iss_core PUBLIC ${SOFTFLOAT_LIB})
+if(NOT EMSCRIPTEN)
+  target_link_libraries(iss_core PUBLIC ZLIB::ZLIB)
+endif()
 if(APPLE)
   target_compile_definitions(iss_core PUBLIC MAP_NORESERVE=0)   # macOS has no such flag; it is only a hint
 endif()
 
-add_library(gengine STATIC gemusic/engine.cc gemusic/guest.cc ${RSPBT}/rsp.cc)
+add_library(gengine STATIC gemusic/engine.cc gemusic/r4300.cc ${RSPBT}/rsp.cc)
 target_include_directories(gengine PUBLIC gemusic ${RSPBT})
 target_link_libraries(gengine PUBLIC iss_core)
 
@@ -124,12 +159,54 @@ if(ENABLE_JIT)
   endif()
 endif()
 
+# ---------------------------------------------------------------- build id
+
+# regenerated every build so a stale page is obvious at a glance
+set(BUILD_ID_H ${CMAKE_CURRENT_BINARY_DIR}/gemms_build_id.h)
+add_custom_target(build_id ALL
+  COMMAND ${CMAKE_COMMAND} -DOUT=${BUILD_ID_H} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_id.cmake
+  BYPRODUCTS ${BUILD_ID_H}
+  COMMENT "stamping the build id")
+
 # ---------------------------------------------------------------- executables
 
-add_executable(gemusic gemusic/gemusic.cc)
-target_link_libraries(gemusic PRIVATE gengine)
+if(NOT EMSCRIPTEN)
+  add_executable(gemusic gemusic/gemusic.cc)
+  target_link_libraries(gemusic PRIVATE gengine Boost::program_options)
+endif()
 
-if(SDL2_FOUND)
+if(EMSCRIPTEN)
+  # SDL2 and zlib come from emscripten's own ports; the ROM arrives from a file
+  # picker at run time, so nothing game-derived is ever built in.
+  add_executable(gemms gemusic/gemms.cc)
+  add_dependencies(gemms build_id)
+  target_include_directories(gemms PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+  target_compile_definitions(gemms PRIVATE HAVE_GEMMS_BUILD_ID)
+  target_link_libraries(gemms PRIVATE gengine)
+  target_compile_options(gemms PRIVATE -sUSE_SDL=2)
+  target_link_options(gemms PRIVATE
+    -sUSE_SDL=2 -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=134217728
+    -sEXPORTED_FUNCTIONS=_main,_malloc,_free,_gemms_load_rom,_gemms_pull,_gemms_ring_fill,_gemms_played_frames,_gemms_build_id,_gemms_ticks,_gemms_rendered,_gemms_pulls
+    -sEXPORTED_RUNTIME_METHODS=ccall,HEAPU8,HEAPF32,UTF8ToString
+    -sENVIRONMENT=web -sSTACK_SIZE=1048576
+    --shell-file ${CMAKE_CURRENT_SOURCE_DIR}/gemusic/web/shell.html)
+  # cmake does not know the shell is an input, so say so or an edit is ignored
+  set_property(TARGET gemms APPEND PROPERTY LINK_DEPENDS
+               ${CMAKE_CURRENT_SOURCE_DIR}/gemusic/web/shell.html)
+  set_target_properties(gemms PROPERTIES SUFFIX ".html")
+  add_custom_command(TARGET gemms POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -DID_H=${BUILD_ID_H} -DHTML=$<TARGET_FILE:gemms>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/stamp_html.cmake)
+
+  # a headless check that the engine itself runs under wasm, runnable with node
+  add_executable(wasm_engine_test gemusic/tests/wasm_engine_test.cc)
+  target_link_libraries(wasm_engine_test PRIVATE gengine)
+  target_link_options(wasm_engine_test PRIVATE
+    -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=134217728 -sSTACK_SIZE=1048576
+    -sENVIRONMENT=node -sNODERAWFS=1 -sEXIT_RUNTIME=1)
+  set_target_properties(wasm_engine_test PROPERTIES SUFFIX ".js")
+elseif(SDL2_FOUND)
   add_executable(gemms gemusic/gemms.cc)
   target_link_libraries(gemms PRIVATE gengine)
   if(SDL2_LIBRARIES AND SDL2_INCLUDE_DIRS)          # pkg-config
@@ -143,7 +220,7 @@ endif()
 
 # ---------------------------------------------------------------- tests
 
-if(ROM)
+if(ROM AND NOT EMSCRIPTEN)
   enable_testing()
   add_executable(adpcm_test gemusic/tests/adpcm_test.cc)
   target_link_libraries(adpcm_test PRIVATE gengine)
@@ -164,7 +241,9 @@ if(ENABLE_JIT)
 else()
   message(STATUS "  RSP JIT ........... no (needs LLVM ${LLVM_MIN}+); interpreter only")
 endif()
-if(SDL2_FOUND)
+if(EMSCRIPTEN)
+  message(STATUS "  gemms player ...... yes (wasm, loads a ROM in the browser)")
+elseif(SDL2_FOUND)
   message(STATUS "  gemms player ...... yes")
 else()
   message(STATUS "  gemms player ...... no (SDL2 not found)")

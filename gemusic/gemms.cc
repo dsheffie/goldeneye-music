@@ -19,18 +19,30 @@
 #include <fstream>
 #include <iostream>
 #include <algorithm>
+#ifndef __EMSCRIPTEN__
 #include <boost/program_options.hpp>
+#endif
 /* we drive the event loop from main() ourselves, so we do not want SDL's main
  * shim (which on macOS would redefine main and pull in SDL2main) */
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include <chrono>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+#ifdef HAVE_GEMMS_BUILD_ID
+#include "gemms_build_id.h"
+#else
+#define GEMMS_BUILD_ID "unstamped"
+#endif
 
 #include "engine.hh"
 #include "ge_addrs.hh"
 #include "pixfont.hh"
 
+#ifndef __EMSCRIPTEN__
 namespace po = boost::program_options;
+#endif
 
 /* ------------------------------------------------------------------ playlist */
 
@@ -119,14 +131,23 @@ static void audio_cb(void *ud, Uint8 *stream, int len) {
   p.played.fetch_add(static_cast<uint64_t>(got));
 }
 
-static void engine_thread(player_t *pp, engine_t *eng) {
-  player_t &p = *pp;
+/* The engine as a resumable pump.  A native build spins it on its own thread; the
+ * wasm build calls step() from the browser's main loop, because pthreads there mean
+ * SharedArrayBuffer and cross-origin isolation headers for no real gain -- the
+ * interpreter renders many times faster than real time either way. */
+struct pump_t {
+  player_t &p;
+  engine_t &eng;
   bool active = false, sounded = false;
   uint64_t rendered = 0;                           /* stereo frames since track start */
   int n_silent = 0, cur_seq = -1;
   int16_t frame[2 * GE_FRAME_SAMPLES];
   const int silence_limit = 2 * GE_OUTPUT_RATE / GE_FRAME_SAMPLES;
-  while(not(p.quit.load())) {
+
+  pump_t(player_t &p, engine_t &eng) : p(p), eng(eng) {}
+
+  /* one iteration: returns false when there is nothing to do right now */
+  bool step() {
     int seq = -1;
     double seek = -1.0;
     bool stop = false;
@@ -142,7 +163,7 @@ static void engine_thread(player_t *pp, engine_t *eng) {
       uint64_t target = (seek >= 0.0) ? static_cast<uint64_t>(seek * GE_OUTPUT_RATE) : 0;
       if(seq >= 0 or target < rendered) {           /* backwards means start over */
 	cur_seq = (seq >= 0) ? seq : cur_seq;
-	eng->start(cur_seq);
+	eng.start(cur_seq);
 	rendered = 0;
 	sounded = false;
 	n_silent = 0;
@@ -150,11 +171,11 @@ static void engine_thread(player_t *pp, engine_t *eng) {
       p.seeking.store(target > rendered);
       auto seek_t0 = std::chrono::steady_clock::now();
       while(rendered + GE_FRAME_SAMPLES <= target and not(p.quit.load())) {   /* fast-forward */
-	eng->render(frame);
+	eng.render(frame);
 	rendered += GE_FRAME_SAMPLES;
       }
       if(p.seeking.load()) {
-	fprintf(stderr, "gemms: seek to %.1f s took %.2f s\n", seek / 1.0,
+	fprintf(stderr, "gemms: seek to %.1f s took %.2f s\n", seek,
 		std::chrono::duration<double>(std::chrono::steady_clock::now() - seek_t0).count());
       }
       p.seeking.store(false);
@@ -164,10 +185,9 @@ static void engine_thread(player_t *pp, engine_t *eng) {
       active = true;
     }
     if(not(active) or ring_used(p) + GE_FRAME_SAMPLES > RING_FRAMES) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
-      continue;
+      return false;
     }
-    eng->render(frame);
+    eng.render(frame);
     /* when does this tune end?  jingles: two seconds of digital silence.  loopers:
      * after loop_passes passes, faded -- unless REPEAT is lit, then never. */
     bool silent = true;
@@ -202,8 +222,20 @@ static void engine_thread(player_t *pp, engine_t *eng) {
       active = false;
       p.track_done.store(true);
     }
+    return true;
+  }
+};
+
+#ifndef __EMSCRIPTEN__
+static void engine_thread(player_t *pp, engine_t *eng) {
+  pump_t pump(*pp, *eng);
+  while(not(pp->quit.load())) {
+    if(not(pump.step())) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
   }
 }
+#endif
 
 /* ------------------------------------------------------------------ drawing */
 
@@ -662,6 +694,313 @@ static bool save_bmp(const canvas_t &c, const std::string &name, int scale) {
   return ok;
 }
 
+/* Shared by the native window and the browser canvas.  Returns false if the app
+ * should quit; win is null in the browser, where there is nothing to minimise and
+ * the page, not us, owns the window. */
+static bool handle_event(const SDL_Event &ev, ui_t &ui, player_t &p, SDL_Window *win, int scale) {
+  static uint32_t last_click = 0;
+  if(ev.type == SDL_QUIT) {
+	return false;
+  }
+  else if(ev.type == SDL_KEYDOWN) {
+	double t_now = static_cast<double>(p.played.load()) / GE_OUTPUT_RATE;
+	switch(ev.key.keysym.sym)
+	  {
+	  case SDLK_q: case SDLK_ESCAPE: return false; break;
+	  case SDLK_z: next_track(ui, p, -1); break;
+	  case SDLK_x: send_play(ui, p, ui.cur); break;
+	  case SDLK_c: case SDLK_SPACE: toggle_pause(ui, p); break;
+	  case SDLK_v: send_stop(ui, p); break;
+	  case SDLK_b: next_track(ui, p, 1); break;
+	  case SDLK_s: ui.shuffle = not(ui.shuffle); break;
+	  case SDLK_r: p.repeat.store(not(p.repeat.load())); break;
+	  case SDLK_UP: p.volume.store(std::min(100, p.volume.load() + 5)); break;
+	  case SDLK_DOWN: p.volume.store(std::max(0, p.volume.load() - 5)); break;
+	  case SDLK_RETURN: send_play(ui, p, ui.sel); break;
+	  case SDLK_LEFT: case SDLK_RIGHT:
+	    if(ui.state != play_state_t::stopped) {
+	      std::lock_guard<std::mutex> lk(p.cmd_lock);
+	      p.cmd_seek = std::max(0.0, t_now + ((ev.key.keysym.sym == SDLK_LEFT) ? -5.0 : 5.0));
+	    }
+	    break;
+	  default: break;
+	  }
+  }
+  else if(ev.type == SDL_MOUSEWHEEL) {
+	int span = std::max(0, static_cast<int>(ui.tracks.size()) - PL_ROWS);
+	ui.pl_scroll = std::min(span, std::max(0, ui.pl_scroll - 3 * ev.wheel.y));
+  }
+  else if(ev.type == SDL_MOUSEBUTTONDOWN and ev.button.button == SDL_BUTTON_LEFT) {
+	int x = ev.button.x / scale, y = ev.button.y / scale;
+	const rect_t *btn[6] = {&R_PREV, &R_PLAY, &R_PAUSE, &R_STOP, &R_NEXT, &R_EJECT};
+	for(int i = 0; i < 6; i++) {
+	  if(btn[i]->has(x, y)) {
+	    ui.pressed = i;
+	  }
+	}
+	if(R_CLOSE.has(x, y)) { return false; }
+	else if(R_MIN.has(x, y)) { if(win != nullptr) { SDL_MinimizeWindow(win); } }
+	else if(R_VOL.has(x, y)) { ui.drag = 1; }
+	else if(R_BAL.has(x, y)) { ui.drag = 2; }
+	else if(R_POS.has(x, y) and ui.state != play_state_t::stopped) { ui.drag = 3; }
+	else if(R_SHUF.has(x, y)) { ui.shuffle = not(ui.shuffle); }
+	else if(R_REP.has(x, y)) { p.repeat.store(not(p.repeat.load())); }
+	else if(R_PL.has(x, y)) {
+	  ui.show_pl = not(ui.show_pl);
+	  if(win != nullptr) {
+	    SDL_SetWindowSize(win, W * scale, (ui.show_pl ? (MAIN_H + PL_H) : MAIN_H) * scale);
+	  }
+	}
+	else if(ui.show_pl and R_PLIST.has(x, y)) {
+	  int i = ui.pl_scroll + (y - R_PLIST.y) / PL_ROW_H;
+	  if(i < static_cast<int>(ui.tracks.size())) {
+	    bool dbl = (i == ui.sel) and (SDL_GetTicks() - last_click < 400);
+	    ui.sel = i;
+	    last_click = SDL_GetTicks();
+	    if(dbl) {
+	      send_play(ui, p, i);
+	    }
+	  }
+	}
+	else if(ui.show_pl and R_PLSCROLL.has(x, y)) { ui.drag = 4; }
+  }
+  if(ev.type == SDL_MOUSEMOTION or ev.type == SDL_MOUSEBUTTONDOWN) {
+	int x = ((ev.type == SDL_MOUSEMOTION) ? ev.motion.x : ev.button.x) / scale;
+	int y = ((ev.type == SDL_MOUSEMOTION) ? ev.motion.y : ev.button.y) / scale;
+	auto frac = [&](const rect_t &r, int knob) { return std::min(1.0, std::max(0.0, static_cast<double>(x - r.x - knob/2) / (r.w - knob))); };
+	if(ui.drag == 1) { p.volume.store(static_cast<int>(frac(R_VOL, 14) * 100.0 + 0.5)); }
+	else if(ui.drag == 2) {
+	  int b = static_cast<int>(frac(R_BAL, 14) * 200.0 + 0.5) - 100;
+	  p.balance.store((std::abs(b) < 12) ? 0 : b);              /* a detent at centre */
+	}
+	else if(ui.drag == 3) { ui.drag_pos = frac(R_POS, 29); }
+	else if(ui.drag == 4) {
+	  int span = std::max(0, static_cast<int>(ui.tracks.size()) - PL_ROWS);
+	  ui.pl_scroll = static_cast<int>(std::min(1.0, std::max(0.0, static_cast<double>(y - R_PLSCROLL.y - 9) / (R_PLSCROLL.h - 18))) * span + 0.5);
+	}
+  }
+  if(ev.type == SDL_MOUSEBUTTONUP and ev.button.button == SDL_BUTTON_LEFT) {
+	int x = ev.button.x / scale, y = ev.button.y / scale;
+	const rect_t *btn[6] = {&R_PREV, &R_PLAY, &R_PAUSE, &R_STOP, &R_NEXT, &R_EJECT};
+	if(ui.pressed >= 0 and btn[ui.pressed]->has(x, y)) {
+	  switch(ui.pressed)
+	    {
+	    case 0: next_track(ui, p, -1); break;
+	    case 1: send_play(ui, p, ui.cur); break;
+	    case 2: toggle_pause(ui, p); break;
+	    case 3: send_stop(ui, p); break;
+	    case 4: next_track(ui, p, 1); break;
+	    default: send_stop(ui, p); ui.cur = ui.sel = ui.pl_scroll = 0; break;   /* eject: back to the top */
+	    }
+	}
+	if(ui.drag == 3 and not(ui.tracks.empty())) {                 /* XMMS seeks on release */
+	  std::lock_guard<std::mutex> lk(p.cmd_lock);
+	  p.cmd_seek = ui.drag_pos * track_total(p, ui.tracks[ui.cur]);
+	}
+	ui.pressed = -1;
+	ui.drag = 0;
+  }
+  return true;
+}
+
+/* ---------------------------------------------------------------- browser front end */
+#ifdef __EMSCRIPTEN__
+
+/* One global session, because the browser hands us the ROM asynchronously and then
+ * drives everything from the main loop.  No worker thread: see pump_t. */
+/* the canvas is this many device pixels per UI pixel; mouse coordinates arrive in
+ * canvas pixels, so the same number has to divide them again */
+static const int WEB_SCALE = 2;
+
+namespace {
+  struct web_t {
+    std::vector<uint8_t> rom;
+    engine_t *eng = nullptr;
+    pump_t *pump = nullptr;
+    player_t *p = nullptr;
+    ui_t ui;
+    canvas_t *canvas = nullptr;
+    SDL_Window *win = nullptr;
+    SDL_Renderer *ren = nullptr;
+    SDL_Texture *tex = nullptr;
+    SDL_AudioDeviceID dev = 0;
+    int have_freq = 0, have_channels = 0, have_samples = 0;
+    double read_frac = 0.0;
+    uint64_t ticks = 0, rendered = 0, pulls = 0;   /* main loop / engine / audio */
+    bool have_rom = false;
+    std::string message = "DROP A GOLDENEYE 007 (NGEE) ROM HERE";
+    uint32_t last_ms = 0;
+  };
+  web_t g_web;
+}
+
+/* called from JavaScript once the user has picked a file */
+extern "C" EMSCRIPTEN_KEEPALIVE void gemms_load_rom(const uint8_t *data, int len) {
+  web_t &w = g_web;
+  if(len < 0x43865a or memcmp(data + 0x3b, "NGEE", 4) != 0) {
+    w.message = "THAT IS NOT A BIG-ENDIAN GOLDENEYE 007 (NGEE) ROM";
+    return;
+  }
+  w.rom.assign(data, data + len);
+  delete w.pump;
+  delete w.eng;
+  w.eng = new engine_t(w.rom);                  /* no jit in the browser */
+  w.pump = new pump_t(*w.p, *w.eng);
+  w.ui.tracks.clear();
+  for(int s = 0; s < w.eng->n_sequences() and s < 63; s++) {
+    seq_info_t info = ge_sequence_info(w.rom, s);
+    if(not(info.empty) and g_titles[s] != nullptr) {
+      w.ui.tracks.push_back({s, g_titles[s], info.seconds, info.loops});
+    }
+  }
+  w.have_rom = true;
+  send_play(w.ui, *w.p, 0);
+}
+
+/* Web Audio pulls from here.  The browser's context runs at its own rate (usually
+ * 48 kHz) while the console's is 22047, so resample on the way out; the fractional
+ * read position lives across calls.  Writes interleaved stereo float, and returns
+ * how many frames actually came from the ring (short means we underran). */
+extern "C" EMSCRIPTEN_KEEPALIVE int gemms_pull(float *out, int frames, int out_rate) {
+  g_web.pulls++;
+  player_t &p = *g_web.p;
+  double step = static_cast<double>(GE_OUTPUT_RATE) / ((out_rate > 0) ? out_rate : GE_OUTPUT_RATE);
+  int vol = p.volume.load(), bal = p.balance.load();
+  double gl = vol * ((bal > 0) ? (100 - bal) : 100) / 10000.0 / 32768.0;
+  double gr = vol * ((bal < 0) ? (100 + bal) : 100) / 10000.0 / 32768.0;
+  uint32_t r = p.ring_r.load(), w = p.ring_w.load(), vw = p.vis_w.load();
+  double frac = g_web.read_frac;
+  int got = 0;
+  bool paused = p.paused.load();
+  for(int i = 0; i < frames; i++) {
+    float l = 0.0f, rr = 0.0f;
+    if(not(paused) and r < w) {
+      /* interpolate towards the next frame when there is one; on the very last
+       * frame hold it instead, so the ring can always drain to empty -- otherwise
+       * a leftover frame stops the track ever being seen as finished */
+      const int16_t *a = &p.ring[2*(r % RING_FRAMES)];
+      const int16_t *b = ((r + 1) < w) ? &p.ring[2*((r + 1) % RING_FRAMES)] : a;
+      l = static_cast<float>((a[0] + (b[0] - a[0]) * frac) * gl);
+      rr = static_cast<float>((a[1] + (b[1] - a[1]) * frac) * gr);
+      frac += step;
+      while(frac >= 1.0 and r < w) {
+	frac -= 1.0;
+	r++;
+	got++;
+      }
+    }
+    out[2*i] = l;
+    out[2*i+1] = rr;
+    p.vis[vw % VIS_LEN] = 0.5f * (l + rr);
+    vw++;
+  }
+  p.ring_r.store(r);
+  p.vis_w.store(vw);
+  g_web.read_frac = frac;
+  p.played.fetch_add(static_cast<uint64_t>(got));
+  return got;
+}
+
+/* what the page shows in its diagnostics line */
+extern "C" EMSCRIPTEN_KEEPALIVE int gemms_ticks() { return static_cast<int>(g_web.ticks); }
+extern "C" EMSCRIPTEN_KEEPALIVE int gemms_rendered() { return static_cast<int>(g_web.rendered); }
+extern "C" EMSCRIPTEN_KEEPALIVE int gemms_pulls() { return static_cast<int>(g_web.pulls); }
+extern "C" EMSCRIPTEN_KEEPALIVE const char *gemms_build_id() { return GEMMS_BUILD_ID; }
+extern "C" EMSCRIPTEN_KEEPALIVE int gemms_audio_dev() { return static_cast<int>(g_web.dev); }
+extern "C" EMSCRIPTEN_KEEPALIVE int gemms_audio_freq() { return g_web.have_freq; }
+extern "C" EMSCRIPTEN_KEEPALIVE int gemms_audio_channels() { return g_web.have_channels; }
+extern "C" EMSCRIPTEN_KEEPALIVE int gemms_ring_fill() { return g_web.p ? static_cast<int>(ring_used(*g_web.p)) : -1; }
+extern "C" EMSCRIPTEN_KEEPALIVE int gemms_played_frames() { return g_web.p ? static_cast<int>(g_web.p->played.load()) : -1; }
+
+static void web_splash(canvas_t &c, const std::string &msg) {
+  c.vgrad(0, 0, W, MAIN_H, C_BODY_T, C_BODY_B);
+  c.bevel(0, 0, W, MAIN_H, C_HI, C_LO);
+  c.vgrad(1, 1, W - 2, 13, 0xff20263au, 0xff10131cu);
+  c.text57(34, 4, "GOLDENEYE MULTIMEDIA SYSTEM", C_TITLE);
+  c.fill(9, 26, W - 18, MAIN_H - 36, C_LCD);
+  c.bevel(8, 25, W - 16, MAIN_H - 34, C_LO, C_HI);
+  int x = (W - static_cast<int>(msg.size()) * 6) / 2;
+  c.text57((x < 12) ? 12 : x, 52, msg, C_GREEN, 10, W - 10);
+  c.text35(84, 72, "NOTHING IS SENT ANYWHERE", 0xff6a7288u);
+  {
+    std::string b = std::string("BUILD ") + GEMMS_BUILD_ID;
+    c.text35((W - static_cast<int>(b.size()) * 4) / 2, 88, b, 0xff4a5268u);
+  }
+}
+
+static void web_frame() {
+  web_t &w = g_web;
+  w.ticks++;
+  SDL_Event ev;
+  while(SDL_PollEvent(&ev)) {
+    if(w.have_rom) {
+      bool pl_was = w.ui.show_pl;
+      handle_event(ev, w.ui, *w.p, w.win, WEB_SCALE);
+      if(w.ui.show_pl != pl_was) {                 /* the PL button resizes the canvas */
+	SDL_SetWindowSize(w.win, W * WEB_SCALE,
+			  (w.ui.show_pl ? (MAIN_H + PL_H) : MAIN_H) * WEB_SCALE);
+      }
+    }
+  }
+  uint32_t now = SDL_GetTicks();
+  double dt = (w.last_ms == 0) ? 0.016 : (now - w.last_ms) * 1e-3;
+  w.last_ms = now;
+  if(w.have_rom) {
+    /* keep the ring topped up; the interpreter is far faster than real time, so a
+     * bounded number of frames per tick is plenty and keeps the browser responsive */
+    for(int i = 0; i < 64 and w.pump->step(); i++) {
+      w.rendered++;
+    }
+    if(w.ui.state == play_state_t::playing) {
+      w.ui.marquee += dt * 30.0;
+      if(w.p->track_done.load() and ring_used(*w.p) == 0) {   /* fully drained */
+	w.p->track_done.store(false);
+	bool at_end = (w.ui.cur + 1 >= static_cast<int>(w.ui.tracks.size())) and not(w.ui.shuffle);
+	if(w.p->repeat.load()) {
+	  send_play(w.ui, *w.p, w.ui.cur);
+	}
+	else if(at_end) {
+	  send_stop(w.ui, *w.p);
+	}
+	else {
+	  next_track(w.ui, *w.p, 1);
+	}
+      }
+    }
+    update_spectrum(w.ui, *w.p, dt);
+    draw(*w.canvas, w.ui, *w.p);
+  }
+  else {
+    web_splash(*w.canvas, w.message);
+  }
+  SDL_UpdateTexture(w.tex, nullptr, w.canvas->px.data(), W * 4);
+  SDL_Rect src = {0, 0, W, (w.have_rom and w.ui.show_pl) ? (MAIN_H + PL_H) : MAIN_H};
+  SDL_RenderClear(w.ren);
+  SDL_RenderCopy(w.ren, w.tex, &src, nullptr);
+  SDL_RenderPresent(w.ren);
+}
+
+int main() {
+  web_t &w = g_web;
+  w.p = new player_t();
+  SDL_SetMainReady();
+  if(SDL_Init(SDL_INIT_VIDEO) != 0) {
+    fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+    return -1;
+  }
+  /* no SDL audio here: the page creates the Web Audio context inside a user
+   * gesture (iOS will not start one otherwise) and pulls through gemms_pull. */
+  w.win = SDL_CreateWindow("gemms", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+			   W * WEB_SCALE, (MAIN_H + PL_H) * WEB_SCALE, 0);
+  w.ren = SDL_CreateRenderer(w.win, -1, 0);
+  SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+  w.tex = SDL_CreateTexture(w.ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, W, MAIN_H + PL_H);
+  w.canvas = new canvas_t(MAIN_H + PL_H);
+  emscripten_set_main_loop(web_frame, 0, 1);
+  return 0;
+}
+
+#else
 int main(int argc, char *argv[]) {
   std::string rom_name = "GoldenEye.z64", shot;
   int scale = 2, start_track = 1;
@@ -727,7 +1066,7 @@ int main(int argc, char *argv[]) {
   }
 
   SDL_SetMainReady();
-  if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
+  if(SDL_Init(SDL_INIT_VIDEO) != 0) {
     fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
     return -1;
   }
@@ -769,105 +1108,7 @@ int main(int argc, char *argv[]) {
   while(running) {
     SDL_Event ev;
     while(SDL_PollEvent(&ev)) {
-      if(ev.type == SDL_QUIT) {
-	running = false;
-      }
-      else if(ev.type == SDL_KEYDOWN) {
-	double t_now = static_cast<double>(p.played.load()) / GE_OUTPUT_RATE;
-	switch(ev.key.keysym.sym)
-	  {
-	  case SDLK_q: case SDLK_ESCAPE: running = false; break;
-	  case SDLK_z: next_track(ui, p, -1); break;
-	  case SDLK_x: send_play(ui, p, ui.cur); break;
-	  case SDLK_c: case SDLK_SPACE: toggle_pause(ui, p); break;
-	  case SDLK_v: send_stop(ui, p); break;
-	  case SDLK_b: next_track(ui, p, 1); break;
-	  case SDLK_s: ui.shuffle = not(ui.shuffle); break;
-	  case SDLK_r: p.repeat.store(not(p.repeat.load())); break;
-	  case SDLK_UP: p.volume.store(std::min(100, p.volume.load() + 5)); break;
-	  case SDLK_DOWN: p.volume.store(std::max(0, p.volume.load() - 5)); break;
-	  case SDLK_RETURN: send_play(ui, p, ui.sel); break;
-	  case SDLK_LEFT: case SDLK_RIGHT:
-	    if(ui.state != play_state_t::stopped) {
-	      std::lock_guard<std::mutex> lk(p.cmd_lock);
-	      p.cmd_seek = std::max(0.0, t_now + ((ev.key.keysym.sym == SDLK_LEFT) ? -5.0 : 5.0));
-	    }
-	    break;
-	  default: break;
-	  }
-      }
-      else if(ev.type == SDL_MOUSEWHEEL) {
-	int span = std::max(0, static_cast<int>(ui.tracks.size()) - PL_ROWS);
-	ui.pl_scroll = std::min(span, std::max(0, ui.pl_scroll - 3 * ev.wheel.y));
-      }
-      else if(ev.type == SDL_MOUSEBUTTONDOWN and ev.button.button == SDL_BUTTON_LEFT) {
-	int x = ev.button.x / scale, y = ev.button.y / scale;
-	const rect_t *btn[6] = {&R_PREV, &R_PLAY, &R_PAUSE, &R_STOP, &R_NEXT, &R_EJECT};
-	for(int i = 0; i < 6; i++) {
-	  if(btn[i]->has(x, y)) {
-	    ui.pressed = i;
-	  }
-	}
-	if(R_CLOSE.has(x, y)) { running = false; }
-	else if(R_MIN.has(x, y)) { SDL_MinimizeWindow(win); }
-	else if(R_VOL.has(x, y)) { ui.drag = 1; }
-	else if(R_BAL.has(x, y)) { ui.drag = 2; }
-	else if(R_POS.has(x, y) and ui.state != play_state_t::stopped) { ui.drag = 3; }
-	else if(R_SHUF.has(x, y)) { ui.shuffle = not(ui.shuffle); }
-	else if(R_REP.has(x, y)) { p.repeat.store(not(p.repeat.load())); }
-	else if(R_PL.has(x, y)) {
-	  ui.show_pl = not(ui.show_pl);
-	  SDL_SetWindowSize(win, W * scale, (ui.show_pl ? (MAIN_H + PL_H) : MAIN_H) * scale);
-	}
-	else if(ui.show_pl and R_PLIST.has(x, y)) {
-	  int i = ui.pl_scroll + (y - R_PLIST.y) / PL_ROW_H;
-	  if(i < static_cast<int>(ui.tracks.size())) {
-	    bool dbl = (i == ui.sel) and (SDL_GetTicks() - last_click < 400);
-	    ui.sel = i;
-	    last_click = SDL_GetTicks();
-	    if(dbl) {
-	      send_play(ui, p, i);
-	    }
-	  }
-	}
-	else if(ui.show_pl and R_PLSCROLL.has(x, y)) { ui.drag = 4; }
-      }
-      if(ev.type == SDL_MOUSEMOTION or ev.type == SDL_MOUSEBUTTONDOWN) {
-	int x = ((ev.type == SDL_MOUSEMOTION) ? ev.motion.x : ev.button.x) / scale;
-	int y = ((ev.type == SDL_MOUSEMOTION) ? ev.motion.y : ev.button.y) / scale;
-	auto frac = [&](const rect_t &r, int knob) { return std::min(1.0, std::max(0.0, static_cast<double>(x - r.x - knob/2) / (r.w - knob))); };
-	if(ui.drag == 1) { p.volume.store(static_cast<int>(frac(R_VOL, 14) * 100.0 + 0.5)); }
-	else if(ui.drag == 2) {
-	  int b = static_cast<int>(frac(R_BAL, 14) * 200.0 + 0.5) - 100;
-	  p.balance.store((std::abs(b) < 12) ? 0 : b);              /* a detent at centre */
-	}
-	else if(ui.drag == 3) { ui.drag_pos = frac(R_POS, 29); }
-	else if(ui.drag == 4) {
-	  int span = std::max(0, static_cast<int>(ui.tracks.size()) - PL_ROWS);
-	  ui.pl_scroll = static_cast<int>(std::min(1.0, std::max(0.0, static_cast<double>(y - R_PLSCROLL.y - 9) / (R_PLSCROLL.h - 18))) * span + 0.5);
-	}
-      }
-      if(ev.type == SDL_MOUSEBUTTONUP and ev.button.button == SDL_BUTTON_LEFT) {
-	int x = ev.button.x / scale, y = ev.button.y / scale;
-	const rect_t *btn[6] = {&R_PREV, &R_PLAY, &R_PAUSE, &R_STOP, &R_NEXT, &R_EJECT};
-	if(ui.pressed >= 0 and btn[ui.pressed]->has(x, y)) {
-	  switch(ui.pressed)
-	    {
-	    case 0: next_track(ui, p, -1); break;
-	    case 1: send_play(ui, p, ui.cur); break;
-	    case 2: toggle_pause(ui, p); break;
-	    case 3: send_stop(ui, p); break;
-	    case 4: next_track(ui, p, 1); break;
-	    default: send_stop(ui, p); ui.cur = ui.sel = ui.pl_scroll = 0; break;   /* eject: back to the top */
-	    }
-	}
-	if(ui.drag == 3 and not(ui.tracks.empty())) {                 /* XMMS seeks on release */
-	  std::lock_guard<std::mutex> lk(p.cmd_lock);
-	  p.cmd_seek = ui.drag_pos * track_total(p, ui.tracks[ui.cur]);
-	}
-	ui.pressed = -1;
-	ui.drag = 0;
-      }
+      running = handle_event(ev, ui, p, win, scale) and running;
     }
 
     uint32_t now = SDL_GetTicks();
@@ -917,3 +1158,4 @@ int main(int argc, char *argv[]) {
   delete pp;
   return 0;
 }
+#endif

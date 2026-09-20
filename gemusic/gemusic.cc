@@ -8,7 +8,7 @@
 #include <vector>
 #include <boost/program_options.hpp>
 
-#include "guest.hh"
+#include "r4300.hh"
 #include "engine.hh"
 #include "rsp.hh"
 #ifdef GEMUSIC_AVX512
@@ -65,7 +65,7 @@ int main(int argc, char *argv[]) {
    * emulator.  There is no OS here; this knob makes the ISS execute them itself. */
   setenv("FP_NODIVTRAP", "1", 1);
 
-  guest_t g(rom);
+  r4300_t g(rom);
   ge_audio_init(g, rom);
   ge_start_sequence(g, rom, seq);
 
@@ -122,12 +122,12 @@ int main(int argc, char *argv[]) {
     /* CPU side: GoldenEye's sequencer + synthesis driver build this frame's command list */
     /* outBuf is a PHYSICAL address (the game passes osVirtualToPhysical(buf)): it goes
      * verbatim into A_SAVEBUFF, whose top byte the microcode treats as a segment id */
-    g.call(GE_alAudioFrame, G_CMDLIST, G_CMDLEN, G_OUTBUF & 0x1fffffffu, GE_FRAME_SAMPLES);
-    uint32_t n_cmds = g.rd32(G_CMDLEN);
+    g.call(GE_alAudioFrame, RAM_CMDLIST, RAM_CMDLEN, RAM_OUTBUF & 0x1fffffffu, GE_FRAME_SAMPLES);
+    uint32_t n_cmds = g.rd32(RAM_CMDLEN);
     if(verbose and (f % 30) == 0) {
       int n_adpcm = 0;
       for(uint32_t i = 0; i < n_cmds; i++) {
-	n_adpcm += ((g.rd32(G_CMDLIST + 8*i) >> 24) == 1);      /* A_ADPCM: one per sounding voice chunk */
+	n_adpcm += ((g.rd32(RAM_CMDLIST + 8*i) >> 24) == 1);      /* A_ADPCM: one per sounding voice chunk */
       }
       fprintf(stderr, "frame %5d: %4u cmds, %3d adpcm decodes\n", f, n_cmds, n_adpcm);
     }
@@ -140,7 +140,7 @@ int main(int argc, char *argv[]) {
       GE_aspMainText & 0x1fffffffu, 0x1000,
       GE_aspMainData & 0x1fffffffu, 0x800,
       0, 0, 0, 0,                                           /* dram stack, output buffer */
-      G_CMDLIST & 0x1fffffffu, n_cmds * 8,
+      RAM_CMDLIST & 0x1fffffffu, n_cmds * 8,
       0, 0                                                  /* yield buffer */
     };
     for(int i = 0; i < 16; i++) {
@@ -176,7 +176,7 @@ int main(int argc, char *argv[]) {
     }
 #endif
     rsp_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    const uint8_t *o = g.ptr(G_OUTBUF);
+    const uint8_t *o = g.ptr(RAM_OUTBUF);
     bool silent = true;
     for(int i = 0; i < 2*GE_FRAME_SAMPLES; i++) {
       int16_t x = static_cast<int16_t>((o[2*i] << 8) | o[2*i+1]);

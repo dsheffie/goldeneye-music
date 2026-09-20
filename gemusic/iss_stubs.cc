@@ -8,10 +8,14 @@
  *
  * Every one of these is unreachable here.  The device calls sit behind
  * sparse_mem::route_devices, which defaults to false and which we never set (we
- * construct a bare sparse_mem in guest.cc); the instrumentation calls sit behind
+ * construct a bare sparse_mem in r4300.cc); the instrumentation calls sit behind
  * null checks on the two globals defined below.  So the bodies are never entered,
  * and defining them lets us link the CPU core alone.  If a stub ever fires it means
- * something turned a feature on, hence the abort rather than a silent return. */
+ * something turned a feature on, hence the abort rather than a silent return.
+ *
+ * The disassembly helpers are the same story: interpret.cc calls them only from
+ * debug and trace paths that this project never enables, and they are the only
+ * reason it would need capstone. */
 #include <cstdio>
 #include <cstdlib>
 
@@ -20,6 +24,8 @@
 #include "sgi_mc.hh"
 #include "sgi_hpc.hh"
 #include "sgi_scc.hh"
+
+#include <string>
 
 static void unreachable(const char *what) {
   fprintf(stderr, "gemusic: %s is stubbed out but was called\n", what);
@@ -46,3 +52,9 @@ void sgi_hpc::enet_poll() { unreachable("sgi_hpc::enet_poll"); }
 uint8_t sgi_scc::read(uint32_t) { unreachable("sgi_scc::read"); return 0; }
 void sgi_scc::write(uint32_t, uint8_t) { unreachable("sgi_scc::write"); }
 void sgi_scc::tick(uint64_t) { unreachable("sgi_scc::tick"); }
+
+/* disassembly: only reached from interpret.cc's trace/debug output */
+static const std::string g_no_disasm = "<disassembly not built in>";
+const std::string &getCondName(uint32_t) { return g_no_disasm; }
+const std::string &getGPRName(uint32_t) { return g_no_disasm; }
+std::string getAsmString(uint32_t, uint32_t) { return g_no_disasm; }

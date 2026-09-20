@@ -4,15 +4,15 @@
 #include <cstdint>
 #include <vector>
 
-#include "guest.hh"
+#include "r4300.hh"
 #include "rsp.hh"
 #ifdef GEMUSIC_LLVM
 #include "rspbt.hh"
 #endif
 
 std::vector<uint8_t> inflate_1172(const uint8_t *p, size_t avail);
-uint32_t ge_audio_init(guest_t &g, const std::vector<uint8_t> &rom);
-void ge_start_sequence(guest_t &g, const std::vector<uint8_t> &rom, int seq);
+uint32_t ge_audio_init(r4300_t &g, const std::vector<uint8_t> &rom);
+void ge_start_sequence(r4300_t &g, const std::vector<uint8_t> &rom, int seq);
 
 /* How long one pass through a sequence is, read from the compact-MIDI data itself. */
 struct seq_info_t {
@@ -26,7 +26,7 @@ seq_info_t ge_sequence_info(const std::vector<uint8_t> &rom, int seq);
  * microcode on the RSP interpreter.  render() produces GE_FRAME_SAMPLES stereo frames. */
 struct engine_t {
   const std::vector<uint8_t> &rom;
-  guest_t *g = nullptr;
+  r4300_t *g = nullptr;
   rsp_t *rsp = nullptr;
 #ifdef GEMUSIC_LLVM
   rspbt *bt = nullptr;                 /* null unless the JIT was requested and built in */

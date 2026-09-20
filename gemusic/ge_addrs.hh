@@ -16,7 +16,7 @@
 #define GE_ROM_DATA_1172     0x21990u
 #define GE_DATA_VADDR        0x80020d90u
 
-/* libaudio (guest functions we call) */
+/* libaudio entry points we call */
 #define GE_alHeapInit        0x80010d30u  /* (ALHeap*, u8 *base, s32 len)            */
 #define GE_alInit            0x8000eb1cu  /* (ALGlobals*, ALSynConfig*)              */
 #define GE_alBnkfNew         0x80010e74u  /* (ALBankFile*, u8 *tbl)                  */
