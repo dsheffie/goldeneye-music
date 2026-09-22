@@ -55,6 +55,8 @@ void sgi_scc::tick(uint64_t) { unreachable("sgi_scc::tick"); }
 
 /* disassembly: only reached from interpret.cc's trace/debug output */
 static const std::string g_no_disasm = "<disassembly not built in>";
+#ifndef GEMUSIC_REAL_DISASM        /* the CFG dump tool links the real ones, which need capstone */
 const std::string &getCondName(uint32_t) { return g_no_disasm; }
 const std::string &getGPRName(uint32_t) { return g_no_disasm; }
 std::string getAsmString(uint32_t, uint32_t) { return g_no_disasm; }
+#endif

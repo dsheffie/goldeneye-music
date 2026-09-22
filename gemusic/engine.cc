@@ -5,6 +5,12 @@
 #include <stdexcept>
 
 #include "engine.hh"
+#ifdef GEMUSIC_R4300BT
+#include <chrono>
+#include "interpret.hh"
+#include "r4300cfg.hh"
+#include "r4300bt.hh"
+#endif
 #include "ge_addrs.hh"
 
 std::vector<uint8_t> inflate_1172(const uint8_t *p, size_t avail);
@@ -84,9 +90,7 @@ engine_t::engine_t(const std::vector<uint8_t> &rom, bool use_jit) : rom(rom) {
 #else
   (void)use_jit;
 #endif
-  /* interp_mips mirrors the r9999 RTL, where div/sqrt trap to an OS soft-float
-   * emulator.  There is no OS here; this knob makes the ISS execute them itself. */
-  setenv("FP_NODIVTRAP", "1", 1);
+
 }
 
 engine_t::~engine_t() {
@@ -94,7 +98,7 @@ engine_t::~engine_t() {
   delete bt;
 #endif
   delete rsp;
-  delete g;
+  delete r4300;
 }
 
 bool engine_t::jit_active() const {
@@ -109,27 +113,109 @@ int engine_t::n_sequences() const {
   return be16(&rom[GE_ROM_SEQ_TABLE]);
 }
 
+#ifdef GEMUSIC_R4300BT
+namespace {
+  /* on_step is a plain function pointer, so the warm-up's observations live here */
+  std::map<uint32_t, std::set<uint32_t>> g_hints;
+  void watch_indirect(r4300_t &c, uint32_t pc, uint32_t insn) {
+    if((insn >> 26) != 0) {
+      return;
+    }
+    const uint32_t fn = insn & 0x3f;
+    const uint32_t rs = (insn >> 21) & 31;
+    if((fn != 8 and fn != 9) or (fn == 8 and rs == 31)) {   /* jr $ra needs no hint */
+      return;
+    }
+    g_hints[pc].insert(static_cast<uint32_t>(c.s->gpr[rs]));
+  }
+}
+
+/* Translate the R4300 audio path.  Call after libaudio has initialised, so the static
+ * walk reads the image the frame loop will actually run.
+ *
+ * The walk needs to be told where the indirect calls go: libaudio is reached almost
+ * entirely through handler pointers, and a walk with no observed targets finds 4
+ * functions out of 86.  So run a few frames first and watch them -- on a throwaway
+ * machine, because doing it on the real one would advance the sequence.  The code image
+ * is identical either way, which is what makes the observations transferable.
+ *
+ * The translation is kept across tunes: a new machine per tune does not change the code,
+ * and both state and RAM are arguments. */
+double ge_r4300bt_setup_seconds = 0.0;
+
+void ge_enable_r4300bt(r4300_t &g, const std::vector<uint8_t> &rom, int seq) {
+  static r4300bt *bt = nullptr;
+  const auto t0 = std::chrono::steady_clock::now();
+  /* The translation hard-codes the FR=0 FP register model (a single in the (r&1) half of
+   * slot (r&~1)), which is what this ROM's code is compiled for.  Under FR=1 the layout
+   * is different and the translation would be wrong, so leave it to the interpreter. */
+  if(((g.s->cpr0[CPR0_SR] >> 26) & 1u) != 0) {
+    fprintf(stderr, "r4300bt: SR.FR is set; not translating\n");
+    return;
+  }
+  if(bt == nullptr) {
+    {
+      r4300_t warm(rom);
+      ge_audio_init(warm, rom);
+      ge_start_sequence(warm, rom, seq);
+      warm.on_step = watch_indirect;
+      for(int i = 0; i < 20; i++) {          /* 20 frames reaches every handler */
+	warm.call(GE_alAudioFrame, RAM_CMDLIST, RAM_CMDLEN, RAM_OUTBUF & 0x1fffffffu, GE_FRAME_SAMPLES);
+      }
+    }
+    const double warm_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    r4300_cfg cfg;
+    cfg.read = [&g](uint32_t va, uint32_t &out) {
+      uint8_t *p = g.ptr_any(va);
+      if(p == nullptr) {
+	return false;
+      }
+      memcpy(&out, p, 4);
+      out = __builtin_bswap32(out);
+      return true;
+    };
+    cfg.hints = g_hints;
+    cfg.discover({GE_alAudioFrame});
+    std::vector<uint32_t> all;
+    for(const auto &kv : cfg.funcs) {
+      all.push_back(kv.first);
+    }
+    bt = new r4300bt();
+    bt->dump_ir = (getenv("R4300BT_IR") != nullptr);
+    bt->translate(cfg, all);
+    ge_r4300bt_setup_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    fprintf(stderr, "r4300bt: warm-up %.2f s, discovery+codegen+LLVM %.2f s\n",
+	    warm_s, bt->compile_seconds);
+  }
+  g.bt = bt;
+}
+#endif
+
 void engine_t::start(int seq) {
   delete rsp;
-  delete g;
-  g = new r4300_t(rom);                  /* a fresh machine per tune: no state leaks */
+  delete r4300;
+  r4300 = new r4300_t(rom);                  /* a fresh machine per tune: no state leaks */
   rsp = new rsp_t();
-  rsp->rdram = g->ptr(0x80000000u);
-  ge_audio_init(*g, rom);
-  ge_start_sequence(*g, rom, seq);
+  rsp->rdram = r4300->ptr(0x80000000u);
+  r4300->on_step = on_step;
+  ge_audio_init(*r4300, rom);
+  ge_start_sequence(*r4300, rom, seq);
+#ifdef GEMUSIC_R4300BT
+  ge_enable_r4300bt(*r4300, rom, seq);
+#endif
 #ifdef GEMUSIC_LLVM
   /* the audio ABI's command dispatch table sits at +0x10 in the microcode's data:
    * 16 big-endian handler addresses.  Only a hint for the translator's jr targets. */
   jr_hints.clear();
   for(int i = 0; i < 16; i++) {
-    jr_hints.push_back(g->rd16(GE_aspMainData + 0x10 + 2*i));
+    jr_hints.push_back(r4300->rd16(GE_aspMainData + 0x10 + 2*i));
   }
 #endif
 }
 
 void engine_t::render(int16_t *out) {
-  g->call(GE_alAudioFrame, RAM_CMDLIST, RAM_CMDLEN, RAM_OUTBUF & 0x1fffffffu, GE_FRAME_SAMPLES);
-  uint32_t n_cmds = g->rd32(RAM_CMDLEN);
+  r4300->call(GE_alAudioFrame, RAM_CMDLIST, RAM_CMDLEN, RAM_OUTBUF & 0x1fffffffu, GE_FRAME_SAMPLES);
+  uint32_t n_cmds = r4300->rd32(RAM_CMDLEN);
   const uint32_t task[16] = {
     2, 0,
     GE_rspbootText & 0x1fffffffu, GE_rspbootText_LEN,
@@ -149,18 +235,18 @@ void engine_t::render(int16_t *out) {
 #ifdef GEMUSIC_LLVM
   if(bt != nullptr) {
     /* rspboot's job, done natively: microcode data to DMEM, text to IMEM 0x080 */
-    memcpy(rsp->mem, g->ptr(GE_aspMainData), 0x800);
-    memcpy(rsp->mem + 0x1080, g->ptr(GE_aspMainText), 0xf80);
+    memcpy(rsp->mem, r4300->ptr(GE_aspMainData), 0x800);
+    memcpy(rsp->mem + 0x1080, r4300->ptr(GE_aspMainText), 0xf80);
     rsp->r[1] = 0xfc0;
     bt->run(*rsp, 0x080, jr_hints);
   }
   else
 #endif
   {
-    memcpy(rsp->mem + 0x1000, g->ptr(GE_rspbootText), GE_rspbootText_LEN);
+    memcpy(rsp->mem + 0x1000, r4300->ptr(GE_rspbootText), GE_rspbootText_LEN);
     rsp->run(0);
   }
-  const uint8_t *o = g->ptr(RAM_OUTBUF);
+  const uint8_t *o = r4300->ptr(RAM_OUTBUF);
   for(int i = 0; i < 2*GE_FRAME_SAMPLES; i++) {
     out[i] = static_cast<int16_t>((o[2*i] << 8) | o[2*i+1]);
   }

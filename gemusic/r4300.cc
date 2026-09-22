@@ -7,6 +7,9 @@
 #include "sparse_mem.hh"
 #include "globals.hh"
 #include "r4300.hh"
+#ifdef GEMUSIC_R4300BT
+#include "r4300bt.hh"
+#endif
 #include "ge_addrs.hh"
 
 /* interp_mips expects these from its main.cc */
@@ -96,6 +99,13 @@ uint8_t *r4300_t::ptr(uint32_t vaddr) {
   return sm->mem + (vaddr & 0x1fffffffu);
 }
 
+uint8_t *r4300_t::ptr_any(uint32_t vaddr) {
+  /* the alias's PFN is 0, so its physical address is just the low 28 bits; the
+   * plain kseg0 mask would leave bit 28 set and land 256 MB away */
+  uint32_t pa = ((vaddr >> 28) == 7) ? (vaddr & 0x0fffffffu) : (vaddr & 0x1fffffffu);
+  return sm->mem + pa;
+}
+
 uint32_t r4300_t::rd32(uint32_t vaddr) {
   return __builtin_bswap32(*reinterpret_cast<uint32_t*>(ptr(vaddr)));
 }
@@ -120,6 +130,17 @@ uint32_t r4300_t::call(uint32_t fn, uint32_t a0, uint32_t a1, uint32_t a2, uint3
   s->gpr[29] = static_cast<int64_t>(static_cast<int32_t>(RAM_STACK_TOP - 64));
   s->gpr[31] = static_cast<int64_t>(static_cast<int32_t>(RAM_RETURN));
   s->pc = static_cast<int64_t>(static_cast<int32_t>(fn));
+#ifdef GEMUSIC_R4300BT
+  /* A translated function runs to its own `jr $ra` and returns here; if it hands back a
+   * pc instead, state_t is already current and the loop below carries on from there. */
+  if(bt != nullptr and bt->have(fn)) {
+    const uint32_t resume = bt->run(s, sm->mem, fn);
+    if(resume == 0) {
+      return static_cast<uint32_t>(s->gpr[2]);
+    }
+    s->pc = static_cast<int64_t>(static_cast<int32_t>(resume));
+  }
+#endif
   const int64_t ret_pc = static_cast<int64_t>(static_cast<int32_t>(RAM_RETURN));
   /* 1ULL: on a 32-bit target (wasm32) unsigned long is 32 bits, the shift is
    * masked to 0, and the budget would come out as 1 -- every call "times out". */
@@ -134,6 +155,9 @@ uint32_t r4300_t::call(uint32_t fn, uint32_t a0, uint32_t a1, uint32_t a2, uint3
       fprintf(stderr, "  f6=%016lx f12=%016lx fcsr=%08x %08x %08x %08x %08x\n", s->cpr1[6], s->cpr1[12],
 	      s->fcr1[0], s->fcr1[1], s->fcr1[2], s->fcr1[3], s->fcr1[4]);
       exit(-1);
+    }
+    if(on_step != nullptr) {
+      on_step(*this, pc32, __builtin_bswap32(*reinterpret_cast<uint32_t*>(ptr_any(pc32))));
     }
     execMips(s);
     n_insns++;

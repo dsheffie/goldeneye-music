@@ -10,6 +10,9 @@
 
 #include "r4300.hh"
 #include "engine.hh"
+#ifdef GEMUSIC_R4300BT
+#include "r4300bt.hh"
+#endif
 #include "rsp.hh"
 #ifdef GEMUSIC_AVX512
 #include "rsp_avx512.hh"
@@ -61,12 +64,18 @@ int main(int argc, char *argv[]) {
     return -1;
   }
 
-  /* interp_mips mirrors the r9999 RTL, where div/sqrt trap to an OS soft-float
-   * emulator.  There is no OS here; this knob makes the ISS execute them itself. */
-  setenv("FP_NODIVTRAP", "1", 1);
+
 
   r4300_t g(rom);
   ge_audio_init(g, rom);
+#ifdef GEMUSIC_R4300BT
+  ge_enable_r4300bt(g, rom, seq);
+  atexit([]{ fprintf(stderr, "r4300bt: %llu instructions in %llu calls still interpreted\n",
+			(unsigned long long)g_r4300bt_callee_insns, (unsigned long long)g_r4300bt_calls); });
+  fprintf(stderr, "r4300bt: setup (warm-up + discovery + JIT) took %.2f s\n", ge_r4300bt_setup_seconds);
+  atexit([]{ for(const auto &kv : g_r4300bt_fallback_targets) {
+	       fprintf(stderr, "r4300bt: fallback to %08x x%llu\n", kv.first, (unsigned long long)kv.second); } });
+#endif
   ge_start_sequence(g, rom, seq);
 
   rsp_t rsp;
@@ -218,5 +227,8 @@ int main(int argc, char *argv[]) {
   fwrite(hdr, sizeof(hdr), 1, fp);                          /* little-endian hosts */
   fwrite(pcm.data(), 2, pcm.size(), fp);
   fclose(fp);
+  fprintf(stderr, "RSP mix: %llu vector ALU, %llu vector ld/st of %llu instructions\n",
+	  (unsigned long long)g_rsp_vec, (unsigned long long)g_rsp_vmem,
+	  (unsigned long long)rsp.n_insns);
   return 0;
 }

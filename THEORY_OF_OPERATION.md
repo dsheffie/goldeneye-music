@@ -135,7 +135,17 @@ Two processors, two models:
   repository a build-time AVX-512 recompilation.  All three are byte-identical.
 
 For 30 seconds of music the split is about 33 million R4300 instructions against 127
-million RSP instructions.
+million RSP instructions -- but those two numbers are not comparable, and it is worth
+saying why.  **55% of the RSP instructions executed here are vector ops**: 32% vector
+ALU, each doing eight 16-bit lanes with a 48-bit accumulator, and 23% vector loads and
+stores moving 16 bytes apiece.  Counting one `vmulf` as "one instruction" beside one
+scalar `addu` understates it by a factor of eight.  Measured in element operations rather
+than instructions, the RSP is doing roughly **13x** the work of the R4300, not the 4x the
+instruction counts suggest -- which is why it dominates the run time.
+
+Instructions per second is a poor headline for this program generally, since the two
+processors have different ISAs and the RSP's are so much wider.  The honest measure is
+how much audio comes out per second of wall clock: see the timings below.
 
 ## The fake machine
 
